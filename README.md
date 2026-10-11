@@ -4,10 +4,10 @@ One-line learnings, ideas and concepts in markdown, plus spaced-repetition study
 Code only: each learning project gets its own command and keeps its data in `<project>/.learn-cli/`.
 
 ```sh
-learn-cli add ml-lab machine learning --dir ~/pr26/ml-lab   # .learn-cli/ there + the command ml-lab in ~/.local/bin
+learn-cli add mll machine learning --dir ~/pr26/ml-lab   # .learn-cli/ there + the command ml-lab in ~/.local/bin
 learn-cli                                                   # list projects · learn-cli -h
-ml-lab cats add eval Metrics, validation, calibration       # inside a project, from any folder
-ml-lab c add Overfitting · ml-lab l add ... · ml-lab learn · ml-lab -h
+mll cats add eval Metrics, validation, calibration       # inside a project, from any folder
+mll c add Overfitting · mll l add ... · mll learn · mll -h
 ```
 
 - `learn-cli` alone manages projects: `ls`, `add`, `edit --name|--topic`, `rm` (removes the command, keeps the data).

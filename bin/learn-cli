@@ -42,7 +42,7 @@ free_cmd() {
 }
 need_proj() { is_proj "$1" || { echo "learn-cli: no project: $1 · learn-cli ls" >&2; exit 1; }; }
 manager_usage() { cat <<U
-${B}learn-cli${X}: manage learning projects. Each project gets its own command (zca, ml-lab, …)
+${B}learn-cli${X}: manage learning projects. Each project gets its own command (zca, mll, …)
 that works from any folder; its data lives in <project folder>/.learn-cli/.
 
 ${B}usage${X}
@@ -58,8 +58,8 @@ ${B}inside a project${X}
   <cmd> -h                                learnings, ideas, concepts and study
 
 ${B}examples${X}
-  cd ~/pr26/ml-lab && learn-cli add ml-lab machine learning and data science
-  learn-cli edit ml-lab --topic deep learning
+  cd ~/pr26/ml-lab && learn-cli add mll machine learning and data science
+  learn-cli edit mll --topic deep learning
 U
 }
 if [ -z "$LEARN_DIR" ]; then
