@@ -134,15 +134,27 @@ OPENAI_API_KEY=oai-k N ai | grep -q 'OPENAI_API_KEY set' || fail "OPENAI_API_KEY
 LLM_BASE_URL=https://x.test/v1 A ai --model foo 2>&1 | grep -q 'export LLM_API_KEY' || fail "hint names the url's key var"
 A ai --url https://y.test/v1 | grep -q 'key missing' || fail "custom remote url: key missing"
 echo '[]' > "$LEARN_DIR/state.json"; [ "$(rc)" = 0 ] || fail "bad state shape"
-# projects: init makes .learn-cli/ + a command that works from any folder; no project -> exit 1
+# manager: learn-cli alone handles projects; each project's command works from any folder
 P=$LEARN_DIR/proj; mkdir -p "$P"; export LEARN_BIN=$LEARN_DIR/bin
-I() { (cd "$P" && env -u LEARN_DIR "$Z" init "$@" >/dev/null 2>&1; echo $?); }
-[ "$(I mylab machine learning)" = 0 ] && grep -qx '> topic: machine learning' "$P/.learn-cli/concepts.md" || fail "init"
-[ "$(I other x)" = 1 ] || fail "init twice"
-rm -r "$P/.learn-cli"; [ "$(I mylab x)" = 1 ] || fail "init existing command"; I mylab2 machine learning >/dev/null
-(cd / && "$LEARN_BIN/mylab2" l add deep >/dev/null 2>&1); grep -q deep "$P/.learn-cli/learnings.md" || fail "command from anywhere"
-(cd / && "$LEARN_BIN/mylab2" 2>&1) | grep -q 'mylab2 learn\|mylab2 <l|i|c>' || fail "hints use the command name"
-[ "$(cd / && env -u LEARN_DIR "$Z" l >/dev/null 2>&1; echo $?)" = 1 ] || fail "no project"
-"$LEARN_BIN/mylab2" c add Overfitting >/dev/null 2>&1; printf '\n\n\n\n' | "$LEARN_BIN/mylab2" learn Overfitting >/dev/null 2>&1
+M() { env -u LEARN_DIR "$Z" "$@"; }; Mrc() { M "$@" >/dev/null 2>&1; echo $?; }
+[ "$(Mrc -h)" = 0 ] && M -h | grep -q 'learn-cli add <cmd>' || fail "manager help"
+M ls 2>&1 | grep -q 'no projects yet' || fail "ls empty"
+[ "$(Mrc add mylab machine learning --dir "$P")" = 0 ] && grep -qx '> topic: machine learning' "$P/.learn-cli/concepts.md" || fail "add"
+[ "$(Mrc add mylab x --dir "$P")" = 1 ] || fail "add existing command"
+[ "$(Mrc add Bad x)" = 2 ] || fail "add kebab"
+[ "$(Mrc l)" = 2 ] || fail "areas only inside a project"
+[ "$(Mrc init x y)" = 2 ] || fail "unknown manager command"
+(cd / && "$LEARN_BIN/mylab" l add deep >/dev/null 2>&1); grep -q deep "$P/.learn-cli/learnings.md" || fail "command from anywhere"
+"$LEARN_BIN/mylab" 2>&1 | grep -q 'mylab <l|i|c>' || fail "hints use the command name"
+"$LEARN_BIN/mylab" -h | grep -q 'concepts on machine learning' || fail "project help shows topic"
+M ls | grep -q 'mylab .* 1 l .*machine learning' || fail "ls row"
+"$LEARN_BIN/mylab" c add Overfitting >/dev/null 2>&1; printf '\n\n\n\n' | "$LEARN_BIN/mylab" learn Overfitting >/dev/null 2>&1
 grep -q 'expert in machine learning' "$LEARN_DIR/srv.sys" || fail "topic in prompt"
+M edit mylab --topic deep learning >/dev/null 2>&1; grep -qx '> topic: deep learning' "$P/.learn-cli/concepts.md" || fail "edit topic"
+[ "$(grep -c '^> topic:' "$P/.learn-cli/concepts.md")" = 1 ] || fail "one topic line"
+M edit mylab --name lab2 >/dev/null 2>&1; [ ! -e "$LEARN_BIN/mylab" ] && "$LEARN_BIN/lab2" l | grep -q deep || fail "edit name"
+[ "$(Mrc edit nope --name x)" = 1 ] || fail "edit unknown"
+M rm lab2 >/dev/null 2>&1; [ ! -e "$LEARN_BIN/lab2" ] && [ -f "$P/.learn-cli/learnings.md" ] || fail "rm keeps data"
+M add lab3 ignored --dir "$P" >/dev/null 2>&1; "$LEARN_BIN/lab3" l | grep -q deep && grep -qx '> topic: deep learning' "$P/.learn-cli/concepts.md" || fail "re-add reuses data"
+echo '#!/bin/sh' > "$LEARN_BIN/other"; [ "$(Mrc rm other)" = 1 ] && [ -e "$LEARN_BIN/other" ] || fail "rm only our commands"
 echo PASS

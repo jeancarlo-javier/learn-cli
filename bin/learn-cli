@@ -1,7 +1,7 @@
 #!/bin/bash
-# learn-cli: capture learnings/ideas/concepts as one-line markdown entries. Bash 3.2 safe.
-# Code only. Each project has its own command (e.g. $N) that runs this with LEARN_DIR=<project>/.learn-cli
-# and LEARN_NAME=<command>; learn-cli init makes both.
+# learn-cli: one-line learnings/ideas/concepts in markdown + spaced-repetition study. Bash 3.2 safe.
+# Code only. Run bare, it manages projects; each project's command (e.g. zca) runs it with
+# LEARN_DIR=<project>/.learn-cli and LEARN_NAME=<command>, and manages that project's entries.
 N=${LEARN_NAME:-learn-cli}
 die() { echo "$N: $1 (use -h)" >&2; exit 2; }
 # tty: color + wrap to terminal width; pipe: plain one line per entry
@@ -28,56 +28,128 @@ render() {
     }
     print "" }' "$F"
 }
+# --- learn-cli itself (no LEARN_DIR) manages projects; a project's command manages its entries ---
+BIN=${LEARN_BIN:-$HOME/.local/bin}
+TAG="# learn-cli project"  # marks a command file as ours: the files in BIN are the project registry
+is_proj() { [ -f "$BIN/$1" ] && grep -qx "$TAG" "$BIN/$1"; }
+dir_of() { sed -n 's/^LEARN_DIR="\(.*\)" LEARN_NAME=.*/\1/p' "$BIN/$1"; }
+write_cmd() {  # $1 command, $2 data dir
+  printf '#!/bin/sh\n%s\nLEARN_DIR="%s" LEARN_NAME=%s exec "%s" "$@"\n' "$TAG" "$2" "$1" "$ME" > "$BIN/$1" && chmod +x "$BIN/$1"
+}
+need_proj() { is_proj "$1" || { echo "learn-cli: no project: $1 · learn-cli ls" >&2; exit 1; }; }
+manager_usage() { cat <<U
+${B}learn-cli${X}: manage learning projects. Each project gets its own command (zca, ml-lab, …)
+that works from any folder; its data lives in <project folder>/.learn-cli/.
+
+${B}usage${X}
+  learn-cli [ls]                          list projects
+  learn-cli add <cmd> <topic...> [--dir <path>]
+                                          new project in <path> (default: here) + the command <cmd>;
+                                          an existing .learn-cli/ there is kept
+  learn-cli edit <cmd> --name <new>       rename the command
+  learn-cli edit <cmd> --topic <topic...> change what the AI tutor teaches
+  learn-cli rm <cmd>                      remove the command; the data stays
+
+${B}inside a project${X}
+  <cmd> -h                                learnings, ideas, concepts and study
+
+${B}examples${X}
+  cd ~/pr26/ml-lab && learn-cli add ml-lab machine learning and data science
+  learn-cli edit ml-lab --topic deep learning
+U
+}
+if [ -z "$LEARN_DIR" ]; then
+  ME=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+  cmd=$1; [ $# -gt 0 ] && shift
+  case "$cmd" in
+    -h|--help) [ $# -eq 0 ] || die "extra argument"; manager_usage;;
+    ""|ls) [ $# -eq 0 ] || die "extra argument"
+      found=
+      for f in "$BIN"/*; do
+        p=$(basename "$f"); is_proj "$p" || continue; found=1; d=$(dir_of "$p")
+        cnt() { awk '/^- \[/{n++} END{print n+0}' "$d/$1.md" 2>/dev/null || echo 0; }
+        t=$(sed -n 's/^> topic: //p' "$d/concepts.md" 2>/dev/null | head -1)
+        printf '  %s%-12s%s %3s l %3s i %3s c  %s\n' "$B" "$p" "$X" "$(cnt learnings)" "$(cnt ideas)" "$(cnt concepts)" "${t:-software engineering}"
+        printf '  %-12s %s%s%s\n' "" "$M" "${d%/.learn-cli}" "$X"
+      done
+      [ -n "$found" ] || echo "no projects yet · learn-cli add <cmd> <topic...>" >&2;;
+    add) dir=$PWD; args=()
+      while [ $# -gt 0 ]; do
+        case "$1" in --dir) [ -d "$2" ] || die "no folder: $2"; dir=$(cd "$2" && pwd); shift 2;; *) args+=("$1"); shift;; esac
+      done
+      [ ${#args[@]} -ge 2 ] || die "usage: learn-cli add <cmd> <topic...> [--dir <path>]"
+      name=${args[0]}; topic="${args[*]:1}"
+      echo "$name" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "command must be kebab-case: $name"
+      { [ -e "$BIN/$name" ] || command -v "$name" >/dev/null; } && { echo "learn-cli: command $name already exists" >&2; exit 1; }
+      mkdir -p "$dir/.learn-cli" "$BIN"
+      if [ -f "$dir/.learn-cli/concepts.md" ]; then note="existing data kept"
+      else printf '# Concepts\n> topic: %s\n\n## inbox\n> Concepts not filed yet.\n' "$topic" > "$dir/.learn-cli/concepts.md"; note="topic: $topic"
+      fi
+      write_cmd "$name" "$dir/.learn-cli"
+      say "$name ready · $note · data in $dir/.learn-cli"
+      hint "next: $name cats add <cat> <description> · $name -h";;
+    edit) [ $# -ge 3 ] || die "usage: learn-cli edit <cmd> --name <new> | --topic <topic...>"
+      need_proj "$1"; p=$1; d=$(dir_of "$p"); shift
+      case "$1" in
+        --name) [ $# -eq 2 ] || die "usage: learn-cli edit <cmd> --name <new>"
+          echo "$2" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "command must be kebab-case: $2"
+          { [ -e "$BIN/$2" ] || command -v "$2" >/dev/null; } && { echo "learn-cli: command $2 already exists" >&2; exit 1; }
+          write_cmd "$2" "$d" && rm "$BIN/$p"; say "renamed: $p → $2";;
+        --topic) shift; t="$*"; f=$d/concepts.md
+          if grep -q '^> topic: ' "$f"; then T="$t" awk '/^> topic: / && !done {print "> topic: " ENVIRON["T"]; done=1; next} {print}' "$f" > "$f.tmp"
+          else T="$t" awk 'NR==1{print; print "> topic: " ENVIRON["T"]; next} {print}' "$f" > "$f.tmp"; fi
+          mv "$f.tmp" "$f"; say "$p topic: $t";;
+        *) die "unknown option: $1";;
+      esac;;
+    rm) [ $# -eq 1 ] || die "usage: learn-cli rm <cmd>"
+      need_proj "$1"; d=$(dir_of "$1"); rm "$BIN/$1"
+      say "removed the command $1 · data kept in $d"
+      hint "back: learn-cli add $1 <topic> --dir ${d%/.learn-cli} · delete for good: rm -r $d";;
+    l|learnings|i|ideas|c|concepts|cats|learn|ai) echo "learn-cli: $cmd runs inside a project: <cmd> $cmd · projects: learn-cli ls" >&2; exit 2;;
+    *) die "unknown command: $cmd";;
+  esac
+  exit 0
+fi
+D=$LEARN_DIR
+TOPIC=$(sed -n 's/^> topic: //p' "$D/concepts.md" 2>/dev/null | head -1)
 usage() { cat <<U
-usage: $N <learnings|l|ideas|i|concepts|c> [command]
-new project: learn-cli init <command> <topic...>  in the project's folder: data goes to .learn-cli/,
-                            the command to ~/.local/bin, e.g. learn-cli init ml-lab machine learning
-  (none)              list entries
-  add <text...>       append an entry
-  edit <ref> <text..> replace text (keeps id, date)
-  rm <ref>            remove an entry
-concepts only:
-  add <text...> [-c <cat>]  file under <cat>; without -c, jev picks it
-  mv <ref> <cat>            move to another category
-       $N cats             categories with counts
-       $N cats <cat>       concepts in <cat>
-       $N cats add <cat> <description...> [--not <what belongs elsewhere>]
-                            (jev classifies by these descriptions)
-       $N cats rm <cat>    remove an empty category
-       $N learn [ref]      study due concepts with the AI (see $N ai): a lesson first
-                            while one is weak, then 3 questions; at a question Enter or ?
-                            shows the answer, q stops; Enter after a result goes to the next
-       $N ai [--model <id>] [--effort <e>] [--url <u>]   show or set the AI; '' or default clears one
-                            efforts: none|minimal|low|medium|high|xhigh
-                            else from env: LLM_MODEL LLM_EFFORT LLM_BASE_URL LLM_API_KEY (OPENAI_API_KEY for OpenAI)
-ref: 4 digits = id, 1-3 digits = # from list (learn also takes the text)
+${B}$N${X}: learnings, ideas and concepts on ${TOPIC:-software engineering}, with an AI tutor
+${M}data: $D · projects: learn-cli -h${X}
+
+${B}usage${X}
+  $N                              overview: counts, newest entry, what's due
+  $N <area> [command]             area: learnings|l  ideas|i  concepts|c
+
+${B}entries${X} (any area)
+  $N l                            list
+  $N l add <text...>              append
+  $N l edit <ref> <text...>       replace the text (keeps id and date)
+  $N l rm <ref>                   remove
+                                  ref: 4 digits = id, 1-3 digits = # from the list
+
+${B}concepts${X}
+  $N c add <text...> [-c <cat>]   file under <cat>; without -c, jev picks one
+  $N c mv <ref> <cat>             move to another category
+  $N cats                         categories with counts
+  $N cats <cat>                   concepts in <cat>
+  $N cats add <cat> <description...> [--not <what belongs elsewhere>]
+                                  jev files concepts by these descriptions
+  $N cats rm <cat>                remove an empty category
+
+${B}study${X}
+  $N learn [ref|text]             due concepts: a lesson while one is weak, then 3 questions;
+                                  at a question Enter or ? shows the answer, q stops
+  $N ai                           show the AI settings
+  $N ai [--model <id>] [--effort <e>] [--url <u>]
+                                  set them; '' or default clears one
+                                  efforts: none|minimal|low|medium|high|xhigh
+                                  else from env: LLM_MODEL LLM_EFFORT LLM_BASE_URL LLM_API_KEY
+                                  (OPENAI_API_KEY for OpenAI)
 U
 }
 case "$1" in -h|--help) [ $# -eq 1 ] || die "extra argument"; usage; exit 0;; esac
-if [ "$1" = init ]; then
-  shift; [ $# -ge 2 ] || die "usage: learn-cli init <command> <topic...>"
-  name=$1; shift; bin=${LEARN_BIN:-$HOME/.local/bin}
-  echo "$name" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "command must be kebab-case: $name"
-  [ -e .learn-cli ] && { echo "$N: .learn-cli already here" >&2; exit 1; }
-  { [ -e "$bin/$name" ] || command -v "$name" >/dev/null; } && { echo "$N: command $name already exists" >&2; exit 1; }
-  mkdir -p .learn-cli "$bin"
-  printf '# Concepts
-> topic: %s
-
-## inbox
-> Concepts not filed yet.
-' "$*" > .learn-cli/concepts.md
-  me=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
-  printf '#!/bin/sh
-LEARN_DIR="%s" LEARN_NAME=%s exec "%s" "$@"
-' "$PWD/.learn-cli" "$name" "$me" > "$bin/$name"
-  chmod +x "$bin/$name"
-  say "$name ready · data in $PWD/.learn-cli · add categories: $name cats add <cat> <description>"; exit 0
-fi
-D=$LEARN_DIR
-[ -n "$D" ] || { echo "$N: no project · run it through a project's command, or learn-cli init <command> <topic>" >&2; exit 1; }
-# learn + ai: code schedules (Leitner), the model teaches + grades. State in .$N-learn.json by
-# concept id, lessons cached forever in .$N-cards.json, model, effort and url in .$N-config.json.
+# learn + ai: code schedules (Leitner), the model teaches + grades. State in state.json by
+# concept id, lessons cached forever in cards.json, model, effort and url in config.json.
 IFS= read -r -d '' py <<'PY' || :
 import difflib, json, os, re, shutil, sys, tempfile, textwrap, threading, urllib.error, urllib.request
 from datetime import date, timedelta
