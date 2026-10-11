@@ -32,8 +32,8 @@ for c in -h --help "learnings -h" "ideas -h"; do [ "$(rc $c)" = 0 ] || fail "hel
 "$Z" i | grep -q idea || fail "alias i"
 [ "$("$Z" l | wc -l | tr -d ' ')" = 2 ] || fail "alias l"
 "$Z" l add viaalias >/dev/null; grep -q viaalias "$LEARN_DIR/learnings.md" || fail "alias add"
-# the seed is only an inbox; these two stand in for a project's own categories
-printf '# Concepts\n\n## principles\n> Design rules.\n\n## architecture\n> System structure.\n\n## inbox\n> Concepts not filed yet.\n' > "$LEARN_DIR/concepts.md"
+# a project as learn-cli add writes it, with two categories of its own
+printf '# Concepts\n> topic: software design\n\n## principles\n> Design rules.\n\n## architecture\n> System structure.\n\n## inbox\n> Concepts not filed yet.\n' > "$LEARN_DIR/concepts.md"
 # concepts: offline (no key) -> inbox; -c files directly; jev itself is checked by hand
 "$Z" c add SOLID -c principles >/dev/null 2>&1 || fail "c add -c"
 "$Z" cats principles | grep -q SOLID || fail "cats <cat>"
@@ -83,7 +83,7 @@ o=$(printf '\n\n?\n\n' | "$Z" learn solid 2>&1)   # new -> lesson first; no answ
 echo "$o" | grep -q LESSON-WHAT && echo "$o" | grep -q REF3 && echo "$o" | grep -q 'not yet' || fail "learn new: $o"
 [ "$(calls lesson) $(calls quiz) $(calls grade)" = "1 1 0" ] || fail "learn new calls"
 grep -q 'lesson none' "$L" || fail "effort none for gpt-6"
-grep -q 'expert in software engineering' "$LEARN_DIR/srv.sys" || fail "default topic"
+grep -q 'expert in software design' "$LEARN_DIR/srv.sys" || fail "topic in prompt"
 python3 -c "import json,sys; s=json.load(open(sys.argv[1]))" "$LEARN_DIR/state.json" || fail "state json"
 o=$(printf '\na\nb\nc\nq\n' | "$Z" learn 1 2>&1)  # box 0 again: cached lesson; graded early -> box stays
 [ "$(calls lesson) $(calls grade)" = "1 1" ] || fail "lesson cached"
@@ -149,7 +149,7 @@ M ls 2>&1 | grep -q 'no projects yet' || fail "ls empty"
 "$LEARN_BIN/mylab" -h | grep -q 'concepts on machine learning' || fail "project help shows topic"
 M ls | grep -q 'mylab .* 1 l .*machine learning' || fail "ls row"
 "$LEARN_BIN/mylab" c add Overfitting >/dev/null 2>&1; printf '\n\n\n\n' | "$LEARN_BIN/mylab" learn Overfitting >/dev/null 2>&1
-grep -q 'expert in machine learning' "$LEARN_DIR/srv.sys" || fail "topic in prompt"
+grep -q 'expert in machine learning' "$LEARN_DIR/srv.sys" || fail "each project its topic"
 M edit mylab --topic deep learning >/dev/null 2>&1; grep -qx '> topic: deep learning' "$P/.learn-cli/concepts.md" || fail "edit topic"
 [ "$(grep -c '^> topic:' "$P/.learn-cli/concepts.md")" = 1 ] || fail "one topic line"
 M edit mylab --name lab2 >/dev/null 2>&1; [ ! -e "$LEARN_BIN/mylab" ] && "$LEARN_BIN/lab2" l | grep -q deep || fail "edit name"

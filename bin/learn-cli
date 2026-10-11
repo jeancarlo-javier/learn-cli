@@ -36,6 +36,10 @@ dir_of() { sed -n 's/^LEARN_DIR="\(.*\)" LEARN_NAME=.*/\1/p' "$BIN/$1"; }
 write_cmd() {  # $1 command, $2 data dir
   printf '#!/bin/sh\n%s\nLEARN_DIR="%s" LEARN_NAME=%s exec "%s" "$@"\n' "$TAG" "$2" "$1" "$ME" > "$BIN/$1" && chmod +x "$BIN/$1"
 }
+free_cmd() {
+  echo "$1" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "command must be kebab-case: $1"
+  { [ -e "$BIN/$1" ] || command -v "$1" >/dev/null; } && { echo "learn-cli: command $1 already exists" >&2; exit 1; }
+}
 need_proj() { is_proj "$1" || { echo "learn-cli: no project: $1 · learn-cli ls" >&2; exit 1; }; }
 manager_usage() { cat <<U
 ${B}learn-cli${X}: manage learning projects. Each project gets its own command (zca, ml-lab, …)
@@ -69,7 +73,7 @@ if [ -z "$LEARN_DIR" ]; then
         p=$(basename "$f"); is_proj "$p" || continue; found=1; d=$(dir_of "$p")
         cnt() { awk '/^- \[/{n++} END{print n+0}' "$d/$1.md" 2>/dev/null || echo 0; }
         t=$(sed -n 's/^> topic: //p' "$d/concepts.md" 2>/dev/null | head -1)
-        printf '  %s%-12s%s %3s l %3s i %3s c  %s\n' "$B" "$p" "$X" "$(cnt learnings)" "$(cnt ideas)" "$(cnt concepts)" "${t:-software engineering}"
+        printf '  %s%-12s%s %3s l %3s i %3s c  %s\n' "$B" "$p" "$X" "$(cnt learnings)" "$(cnt ideas)" "$(cnt concepts)" "$t"
         printf '  %-12s %s%s%s\n' "" "$M" "${d%/.learn-cli}" "$X"
       done
       [ -n "$found" ] || echo "no projects yet · learn-cli add <cmd> <topic...>" >&2;;
@@ -79,8 +83,7 @@ if [ -z "$LEARN_DIR" ]; then
       done
       [ ${#args[@]} -ge 2 ] || die "usage: learn-cli add <cmd> <topic...> [--dir <path>]"
       name=${args[0]}; topic="${args[*]:1}"
-      echo "$name" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "command must be kebab-case: $name"
-      { [ -e "$BIN/$name" ] || command -v "$name" >/dev/null; } && { echo "learn-cli: command $name already exists" >&2; exit 1; }
+      free_cmd "$name"
       mkdir -p "$dir/.learn-cli" "$BIN"
       if [ -f "$dir/.learn-cli/concepts.md" ]; then note="existing data kept"
       else printf '# Concepts\n> topic: %s\n\n## inbox\n> Concepts not filed yet.\n' "$topic" > "$dir/.learn-cli/concepts.md"; note="topic: $topic"
@@ -92,8 +95,7 @@ if [ -z "$LEARN_DIR" ]; then
       need_proj "$1"; p=$1; d=$(dir_of "$p"); shift
       case "$1" in
         --name) [ $# -eq 2 ] || die "usage: learn-cli edit <cmd> --name <new>"
-          echo "$2" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "command must be kebab-case: $2"
-          { [ -e "$BIN/$2" ] || command -v "$2" >/dev/null; } && { echo "learn-cli: command $2 already exists" >&2; exit 1; }
+          free_cmd "$2"
           write_cmd "$2" "$d" && rm "$BIN/$p"; say "renamed: $p → $2";;
         --topic) shift; t="$*"; f=$d/concepts.md
           if grep -q '^> topic: ' "$f"; then T="$t" awk '/^> topic: / && !done {print "> topic: " ENVIRON["T"]; done=1; next} {print}' "$f" > "$f.tmp"
@@ -111,9 +113,9 @@ if [ -z "$LEARN_DIR" ]; then
   exit 0
 fi
 D=$LEARN_DIR
-TOPIC=$(sed -n 's/^> topic: //p' "$D/concepts.md" 2>/dev/null | head -1)
+export TOPIC=$(sed -n 's/^> topic: //p' "$D/concepts.md" 2>/dev/null | head -1)  # the python parts read it too
 usage() { cat <<U
-${B}$N${X}: learnings, ideas and concepts on ${TOPIC:-software engineering}, with an AI tutor
+${B}$N${X}: learnings, ideas and concepts on $TOPIC, with an AI tutor
 ${M}data: $D · projects: learn-cli -h${X}
 
 ${B}usage${X}
@@ -184,9 +186,6 @@ def write(p, v):  # atomic: a crash never leaves half a file
 def keep(p, k, v):  # merge one key into the file as it is now: another session may have written meanwhile
     d = read(p, {}); d[k] = v; write(p, d)
 
-def topic():  # "> topic: ..." under the title of concepts.md; software engineering otherwise
-    try: return next((l[9:].strip() for l in open(f"{D}/concepts.md", encoding="utf-8") if l.startswith("> topic: ")), None) or "software engineering"
-    except OSError: return "software engineering"
 def concepts():
     out_, cat = [], None
     try:
@@ -238,7 +237,7 @@ def api(path, body=None):
     except (OSError, ValueError) as e: raise RuntimeError(str(getattr(e, "reason", e)))
 def chat(ask):
     body = {"model": MODEL,
-            "messages": [{"role": "system", "content": f"You are an expert in {topic()} tutoring a learner. Reply with JSON only."},
+            "messages": [{"role": "system", "content": f"You are an expert in {os.environ["TOPIC"]} tutoring a learner. Reply with JSON only."},
                          {"role": "user", "content": ask}]}
     if "anthropic.com" not in BASE: body["response_format"] = {"type": "json_object"}  # ponytail: Anthropic's OpenAI layer only takes a strict json_schema; the prompt asks for JSON
     if effort(): body["reasoning_effort"] = effort()  # ponytail: the one vendor-specific field; a chosen effort goes to any model
@@ -465,15 +464,6 @@ find_ln() {
 }
 
 # --- concepts: "## <cat>" sections with a "> description" line jev reads ---
-seed() {
-  [ -f "$F" ] && return
-  cat > "$F" <<'SEED'
-# Concepts
-
-## inbox
-> Concepts not filed yet.
-SEED
-}
 cat_exists() { grep -qx "## $1" "$F" 2>/dev/null; }
 need_cat() { cat_exists "$1" || { echo "$N: unknown category: $1 · $N cats" >&2; exit 2; }; }
 # insert line $2 at the end of category $1; sets ln = its file line
@@ -490,10 +480,9 @@ jev() {
 # prompt shape picked by brute-force eval (focus + what/not_for, no map examples): 71/71 held-out
 import json, sys, os, urllib.request
 text, path = sys.argv[1], sys.argv[2]
-cats, cur, topic = {}, None, "software engineering"
+cats, cur, topic = {}, None, os.environ["TOPIC"]
 for line in open(path, encoding="utf-8"):
-    if not cur and line.startswith("> topic: "): topic = line[9:].strip() or topic
-    elif line.startswith("## "): cur = line[3:].strip(); cats[cur] = {}
+    if line.startswith("## "): cur = line[3:].strip(); cats[cur] = {}
     elif cur and line.startswith("> not: "): cats[cur]["not_for"] = line[7:].strip()
     elif cur and line.startswith("> "): cats[cur]["what"] = line[2:].strip()
 cats.pop("inbox", None)
@@ -515,7 +504,6 @@ PY
 }
 
 if [ "$area" = cats ]; then
-  seed
   case "$cmd" in
     "") awk -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
       function out() { if (c != "") { line = sprintf("%-14s %3d  %s", c, n, d)
@@ -566,7 +554,6 @@ case "$cmd" in
       printf '%s\n' "$E" >> "$F"
       say "added to $A"; render "$(wc -l < "$F")"; exit 0
     fi
-    seed
     # a concept is mapped once: same name (case-insensitive) -> show the existing one
     dup=$(T="$T" awk '/^- \[/{n++; t=$0; sub(/^- \[[0-9]+\] [0-9-]+ ?/,"",t); if (tolower(t)==tolower(ENVIRON["T"])) {print NR; exit}}' "$F")
     [ -n "$dup" ] && { echo "$N: already mapped" >&2; render "$dup"; exit 1; }
