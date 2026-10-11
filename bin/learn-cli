@@ -1,7 +1,9 @@
 #!/bin/bash
-# zca: capture learnings/ideas/concepts as one-line markdown entries. Bash 3.2 safe.
-# Code only: each project keeps its data in the folder that holds its concepts.md.
-die() { echo "zca: $1 (use -h)" >&2; exit 2; }
+# learn-cli: capture learnings/ideas/concepts as one-line markdown entries. Bash 3.2 safe.
+# Code only. Each project has its own command (e.g. $N) that runs this with LEARN_DIR=<project>/.learn-cli
+# and LEARN_NAME=<command>; learn-cli init makes both.
+N=${LEARN_NAME:-learn-cli}
+die() { echo "$N: $1 (use -h)" >&2; exit 2; }
 # tty: color + wrap to terminal width; pipe: plain one line per entry
 if [ -t 1 ] && [ -z "$NO_COLOR" ]; then
   B=$'\e[1m' M=$'\e[2m' G=$'\e[32m' X=$'\e[0m' W=$(tput cols 2>/dev/null || echo 80)
@@ -27,9 +29,9 @@ render() {
     print "" }' "$F"
 }
 usage() { cat <<U
-usage: zca <learnings|l|ideas|i|concepts|c> [command]
-project: the nearest folder up from here with a concepts.md, else ZCA_HOME (ZCA_DIR overrides)
-       zca init <topic...>  start a project here, e.g. zca init machine learning
+usage: $N <learnings|l|ideas|i|concepts|c> [command]
+new project: learn-cli init <command> <topic...>  in the project's folder: data goes to .learn-cli/,
+                            the command to ~/.local/bin, e.g. learn-cli init ml-lab machine learning
   (none)              list entries
   add <text...>       append an entry
   edit <ref> <text..> replace text (keeps id, date)
@@ -37,15 +39,15 @@ project: the nearest folder up from here with a concepts.md, else ZCA_HOME (ZCA_
 concepts only:
   add <text...> [-c <cat>]  file under <cat>; without -c, jev picks it
   mv <ref> <cat>            move to another category
-       zca cats             categories with counts
-       zca cats <cat>       concepts in <cat>
-       zca cats add <cat> <description...> [--not <what belongs elsewhere>]
+       $N cats             categories with counts
+       $N cats <cat>       concepts in <cat>
+       $N cats add <cat> <description...> [--not <what belongs elsewhere>]
                             (jev classifies by these descriptions)
-       zca cats rm <cat>    remove an empty category
-       zca learn [ref]      study due concepts with the AI (see zca ai): a lesson first
+       $N cats rm <cat>    remove an empty category
+       $N learn [ref]      study due concepts with the AI (see $N ai): a lesson first
                             while one is weak, then 3 questions; at a question Enter or ?
                             shows the answer, q stops; Enter after a result goes to the next
-       zca ai [--model <id>] [--effort <e>] [--url <u>]   show or set the AI; '' or default clears one
+       $N ai [--model <id>] [--effort <e>] [--url <u>]   show or set the AI; '' or default clears one
                             efforts: none|minimal|low|medium|high|xhigh
                             else from env: LLM_MODEL LLM_EFFORT LLM_BASE_URL LLM_API_KEY (OPENAI_API_KEY for OpenAI)
 ref: 4 digits = id, 1-3 digits = # from list (learn also takes the text)
@@ -53,19 +55,29 @@ U
 }
 case "$1" in -h|--help) [ $# -eq 1 ] || die "extra argument"; usage; exit 0;; esac
 if [ "$1" = init ]; then
-  shift; [ $# -ge 1 ] || die "usage: zca init <topic...>"
-  [ -f concepts.md ] && { echo "zca: concepts.md already here" >&2; exit 1; }
-  printf '# Concepts\n> topic: %s\n\n## inbox\n> Concepts not filed yet.\n' "$*" > concepts.md
-  say "zca project started in $PWD · add categories: zca cats add <cat> <description>"; exit 0
+  shift; [ $# -ge 2 ] || die "usage: learn-cli init <command> <topic...>"
+  name=$1; shift; bin=${LEARN_BIN:-$HOME/.local/bin}
+  echo "$name" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "command must be kebab-case: $name"
+  [ -e .learn-cli ] && { echo "$N: .learn-cli already here" >&2; exit 1; }
+  { [ -e "$bin/$name" ] || command -v "$name" >/dev/null; } && { echo "$N: command $name already exists" >&2; exit 1; }
+  mkdir -p .learn-cli "$bin"
+  printf '# Concepts
+> topic: %s
+
+## inbox
+> Concepts not filed yet.
+' "$*" > .learn-cli/concepts.md
+  me=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+  printf '#!/bin/sh
+LEARN_DIR="%s" LEARN_NAME=%s exec "%s" "$@"
+' "$PWD/.learn-cli" "$name" "$me" > "$bin/$name"
+  chmod +x "$bin/$name"
+  say "$name ready · data in $PWD/.learn-cli · add categories: $name cats add <cat> <description>"; exit 0
 fi
-D=$ZCA_DIR
-if [ -z "$D" ]; then
-  d=$PWD; while :; do [ -f "$d/concepts.md" ] && { D=$d; break; }; [ "$d" = / ] && break; d=$(dirname "$d"); done
-  D=${D:-$ZCA_HOME}  # outside any project: the default one
-  [ -n "$D" ] || { echo "zca: no concepts.md here or above · zca init <topic>, or set ZCA_DIR / ZCA_HOME" >&2; exit 1; }
-fi
-# learn + ai: code schedules (Leitner), the model teaches + grades. State in .zca-learn.json by
-# concept id, lessons cached forever in .zca-cards.json, model, effort and url in .zca-config.json.
+D=$LEARN_DIR
+[ -n "$D" ] || { echo "$N: no project · run it through a project's command, or learn-cli init <command> <topic>" >&2; exit 1; }
+# learn + ai: code schedules (Leitner), the model teaches + grades. State in .$N-learn.json by
+# concept id, lessons cached forever in .$N-cards.json, model, effort and url in .$N-config.json.
 IFS= read -r -d '' py <<'PY' || :
 import difflib, json, os, re, shutil, sys, tempfile, textwrap, threading, urllib.error, urllib.request
 from datetime import date, timedelta
@@ -73,14 +85,15 @@ D, mode, args = sys.argv[1], sys.argv[2], sys.argv[3:]
 DAYS = [1, 3, 7, 16, 35, 90]  # ponytail: Leitner boxes, SM-2/FSRS if too blunt
 TOP = len(DAYS) - 1
 API, EFFORTS = "https://api.openai.com/v1", ("none", "minimal", "low", "medium", "high", "xhigh")
-SP, CP, CONF = f"{D}/.zca-learn.json", f"{D}/.zca-cards.json", f"{D}/.zca-config.json"
+SP, CP, CONF = f"{D}/state.json", f"{D}/cards.json", f"{D}/config.json"
+N = os.environ.get("LEARN_NAME") or "learn-cli"
 if sys.stdin.isatty(): import readline  # line editing in answers
 COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 W = min(shutil.get_terminal_size((80, 24)).columns, 100) if sys.stdout.isatty() else 80
 today = date.today().isoformat()
 c = lambda code, s: f"\033[{code}m{s}\033[0m" if COLOR else s
 def die(m, fix="", code=1):
-    sys.stdout.flush(); print(f"zca: {m}" + (f" · {fix}" if fix else ""), file=sys.stderr); sys.exit(code)
+    sys.stdout.flush(); print(f"{N}: {m}" + (f" · {fix}" if fix else ""), file=sys.stderr); sys.exit(code)
 def out(text, ind=2, code=0, first=None):
     """Wrap to the terminal; `first` replaces the indent of line one (e.g. a label)."""
     pad, lines = " " * ind, []
@@ -123,10 +136,10 @@ def resolve(cons, ref):  # id, # or text (exact, then a unique substring)
     hit = [x for x in cons if x["id"] == ref or (ref.isdigit() and len(ref) < 4 and x["n"] == int(ref))] \
         or [x for x in cons if x["text"].casefold() == ref.casefold()] \
         or [x for x in cons if ref.casefold() in x["text"].casefold()]
-    if len(hit) > 1: die(f"«{ref}» matches {len(hit)} concepts", "use its #: zca c")
-    return hit[0] if hit else die(f"no concept: {ref}", "zca c")
+    if len(hit) > 1: die(f"«{ref}» matches {len(hit)} concepts", f"use its #: {N} c")
+    return hit[0] if hit else die(f"no concept: {ref}", f"{N} c")
 
-# --- AI: every provider speaks the OpenAI chat format. Each setting on its own: saved (zca ai) > the shared
+# --- AI: every provider speaks the OpenAI chat format. Each setting on its own: saved ({N} ai) > the shared
 # LLM_* env > default. The key follows the effective url, so a key never reaches another provider ---
 env = lambda n: os.environ.get(n) or None
 shared_effort = lambda: (lambda e: e if e in EFFORTS else None)((env("LLM_EFFORT") or "").strip().lower())  # unknown: never sent
@@ -139,7 +152,7 @@ def setup(cf):  # (re)compute the effective settings from a saved config
     KEYVAR = "LLM_API_KEY" if BASE == (env("LLM_BASE_URL") or "").rstrip("/") else "OPENAI_API_KEY" if BASE == API else None
     KEY = os.environ.get(KEYVAR or "", "")
 setup(conf)
-keyhint = lambda: f"export {KEYVAR}=…" if KEYVAR else f"no key goes to {BASE}: zca ai --url default, or export LLM_BASE_URL={BASE} LLM_API_KEY=…"
+keyhint = lambda: f"export {KEYVAR}=…" if KEYVAR else f"no key goes to {BASE}: {N} ai --url default, or export LLM_BASE_URL={BASE} LLM_API_KEY=…"
 ai_ready = lambda: bool(KEY) or bool(re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])([:/]|$)", BASE))  # only a local server needs no key
 def api(path, body=None):
     h = {"Content-Type": "application/json", **({"Authorization": "Bearer " + KEY} if KEY else {})}
@@ -218,9 +231,9 @@ def need(fn, w):  # a model call, or die naming what fixes it
     try: return fn()
     except Exception as e:
         m = str(e)
-        die(f"AI unavailable ({m})", ("unset LLM_EFFORT" if shared_effort() and not conf.get("effort") else "zca ai --effort default") if "reasoning" in m.lower() else keyhint() if m[:3] == "401"
-            else f"check credits or wait, then zca learn {w['n']}" if m[:3] == "429" else "zca ai --model <id>" if m[:3] in ("400", "404")
-            else f"retry: zca learn {w['n']}")
+        die(f"AI unavailable ({m})", ("unset LLM_EFFORT" if shared_effort() and not conf.get("effort") else f"{N} ai --effort default") if "reasoning" in m.lower() else keyhint() if m[:3] == "401"
+            else f"check credits or wait, then {N} learn {w['n']}" if m[:3] == "429" else f"{N} ai --model <id>" if m[:3] in ("400", "404")
+            else f"retry: {N} learn {w['n']}")
 def later(fn):  # the model writes the questions while the learner reads
     box = {}
     def run():
@@ -279,7 +292,7 @@ def study(w):
     return score
 
 def learn():
-    cons = concepts() or die("no concepts yet", "zca c add <text>")
+    cons = concepts() or die("no concepts yet", f"{N} c add <text>")
     if not ai_ready(): die("learn needs " + (KEYVAR or f"a key for {BASE}"), keyhint())
     done, got = set(), []
     st = read(SP, {})
@@ -303,9 +316,9 @@ def run(w, done, got):
             if ask(c(2, f"\n  Enter: next ({w['text']}) · q: stop ")) == "q": break
         except EOFError: print(); break
 
-def ai():  # zca ai [--model <id>] [--effort <e>] [--url <u>]: all validated before anything is written
+def ai():  # {N} ai [--model <id>] [--effort <e>] [--url <u>]: all validated before anything is written
     opts = {k: ("" if v.strip().lower() in ("", "default") else v.strip()) for k, v in zip(args[::2], args[1::2])}  # "" clears
-    if len(args) % 2 or set(opts) - {"--model", "--effort", "--url"}: die("usage: zca ai [--model <id>] [--effort <e>] [--url <u>]", code=2)
+    if len(args) % 2 or set(opts) - {"--model", "--effort", "--url"}: die(f"usage: {N} ai [--model <id>] [--effort <e>] [--url <u>]", code=2)
     new = dict(conf)
     if "--effort" in opts:
         e = opts["--effort"].lower()
@@ -334,30 +347,30 @@ def ai():  # zca ai [--model <id>] [--effort <e>] [--url <u>]: all validated bef
     print(f"api     {BASE}" + lbl(new.get("url"), env("LLM_BASE_URL"), "LLM_BASE_URL") + " · "
           + (f"{KEYVAR} " + ("set" if KEY else c(31, "missing")) if KEYVAR else c(2, "none") if ai_ready() else c(31, "key missing")))
 
-def due():  # one row for the bare zca overview, 0 tokens
+def due():  # one row for the bare {N} overview, 0 tokens
     cons, st = concepts(), read(SP, {})
     if not cons: return
     n = sum(is_due(x, st) for x in cons)
-    tail = f"{n} due today · zca learn" if n else f"all caught up · next {ahead(cons, st)[5:]}"
+    tail = f"{n} due today · {N} learn" if n else f"all caught up · next {ahead(cons, st)[5:]}"
     print(f"    {'learn':<10} {n:>3}  {c(2, tail)}")
 
 try: {"learn": learn, "ai": ai, "due": due}[mode]()
 except (KeyboardInterrupt, EOFError): print(); sys.exit(130)
 PY
-# bare zca: overview of every area (count, newest entry, inbox backlog) + how to go on
+# bare $N: overview of every area (count, newest entry, inbox backlog) + how to go on
 if [ $# -eq 0 ]; then
   for a in learnings ideas concepts; do
     f=$D/$a.md; [ -f "$f" ] || f=/dev/null
-    awk -v a="$a" -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
+    awk -v a="$a" -v nm="$N" -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
     /^## /{ cat = $2 } /^- \[/{ n++; if ($3 >= d) { d = $3; t = $0 } if (cat == "inbox") ib++ }
     END{ sub(/^- \[[0-9]+\] [0-9-]+ ?/, "", t)
-      tail = n ? substr(d, 6) "  " t : "empty · zca " substr(a, 1, 1) " add <text>"
+      tail = n ? substr(d, 6) "  " t : "empty · " nm " " substr(a, 1, 1) " add <text>"
       if (ib) tail = ib " in inbox · " tail
       if (w && 22 + length(tail) > w) tail = substr(tail, 1, w - 23) "…"
       printf "  %s%s%s %-10s %3d  %s%s%s\n", b, substr(a, 1, 1), x, a, n, m, tail, x }' "$f"
   done
   python3 -c "$py" "$D" due
-  hint "${M}list: zca <l|i|c> · add: zca <l|i|c> add <text> · zca cats · zca learn · zca -h${X}"
+  hint "${M}list: $N <l|i|c> · add: $N <l|i|c> add <text> · $N cats · $N learn · $N -h${X}"
   exit 0
 fi
 case "$1" in
@@ -376,7 +389,7 @@ find_ln() {
   case "$1" in ''|*[!0-9]*|?????*) die "bad ref: $1";; esac
   [ -f "$F" ] && ln=$(awk -v r="$1" '/^- \[/{n++; id=substr($2,2,4);
     if ((length(r)==4 && id==r) || (length(r)<4 && n+0==r+0)) {print NR; exit}}' "$F")
-  [ -n "$ln" ] || { echo "zca: no entry: $1" >&2; exit 1; }
+  [ -n "$ln" ] || { echo "$N: no entry: $1" >&2; exit 1; }
 }
 
 # --- concepts: "## <cat>" sections with a "> description" line jev reads ---
@@ -390,7 +403,7 @@ seed() {
 SEED
 }
 cat_exists() { grep -qx "## $1" "$F" 2>/dev/null; }
-need_cat() { cat_exists "$1" || { echo "zca: unknown category: $1 · zca cats" >&2; exit 2; }; }
+need_cat() { cat_exists "$1" || { echo "$N: unknown category: $1 · $N cats" >&2; exit 2; }; }
 # insert line $2 at the end of category $1; sets ln = its file line
 put_in() {
   local at gap  # gap: keep a blank line between the description and the first entry
@@ -441,16 +454,16 @@ if [ "$area" = cats ]; then
       while [ $# -gt 0 ]; do
         case "$1" in --not) [ -n "$2" ] || die "missing --not text"; not=$2; shift 2;; *) args+=("$1"); shift;; esac
       done
-      [ -n "$c" ] && [ ${#args[@]} -ge 1 ] || die "usage: zca cats add <cat> <description...> [--not <text>]"
+      [ -n "$c" ] && [ ${#args[@]} -ge 1 ] || die "usage: $N cats add <cat> <description...> [--not <text>]"
       echo "$c" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "category must be kebab-case: $c"
-      cat_exists "$c" && { echo "zca: category exists: $c" >&2; exit 1; }
+      cat_exists "$c" && { echo "$N: category exists: $c" >&2; exit 1; }
       printf '\n## %s\n> %s\n' "$c" "${args[*]}" >> "$F"
       [ -n "$not" ] && printf '> not: %s\n' "$not" >> "$F"
       say "category added: $c ${M}(jev reads its description; edit it in concepts.md to steer)${X}";;
-    rm) [ $# -eq 1 ] || die "usage: zca cats rm <cat>"
+    rm) [ $# -eq 1 ] || die "usage: $N cats rm <cat>"
       need_cat "$1"; [ "$1" = inbox ] && die "inbox is the fallback, it stays"
       n=$(render 0 "$1" | grep -c .)
-      [ "$n" -eq 0 ] || { echo "zca: $1 has $n concepts · move them first: zca c mv <ref> <cat>" >&2; exit 1; }
+      [ "$n" -eq 0 ] || { echo "$N: $1 has $n concepts · move them first: $N c mv <ref> <cat>" >&2; exit 1; }
       awk -v c="## $1" '$0==c{s=1; next} s&&/^## /{s=0} !s' "$F" | cat -s > "$F.tmp" && mv "$F.tmp" "$F"
       say "category removed: $1";;
     -*) die "unknown option: $cmd";;
@@ -462,7 +475,7 @@ if [ "$area" = cats ]; then
 fi
 
 case "$cmd" in
-  "") grep -q '^- \[' "$F" 2>/dev/null || { echo "no $A yet · zca $area add <text>" >&2; exit 0; }
+  "") grep -q '^- \[' "$F" 2>/dev/null || { echo "no $A yet · $N $area add <text>" >&2; exit 0; }
     render;;
   add) cat=; args=()
     while [ $# -gt 0 ]; do
@@ -484,7 +497,7 @@ case "$cmd" in
     seed
     # a concept is mapped once: same name (case-insensitive) -> show the existing one
     dup=$(T="$T" awk '/^- \[/{n++; t=$0; sub(/^- \[[0-9]+\] [0-9-]+ ?/,"",t); if (tolower(t)==tolower(ENVIRON["T"])) {print NR; exit}}' "$F")
-    [ -n "$dup" ] && { echo "zca: already mapped" >&2; render "$dup"; exit 1; }
+    [ -n "$dup" ] && { echo "$N: already mapped" >&2; render "$dup"; exit 1; }
     [ -n "$cat" ] && need_cat "$cat"
     note= alt=
     if [ -z "$cat" ]; then
@@ -500,11 +513,11 @@ case "$cmd" in
     put_in "$cat" "$E"
     say "added to concepts → ${B}$cat${X} ${M}$note${X}"; render "$ln"
     n=$(awk -v ln="$ln" '/^- \[/{n++} NR==ln{print n; exit}' "$F")
-    [ "$cat" = inbox ] && [ -z "$alt" ] && hint "file it: zca c mv $n <cat> · new one: zca cats add <cat> <description>"
-    [ -n "$alt" ] && hint "prefer $alt? zca c mv $n $alt"
+    [ "$cat" = inbox ] && [ -z "$alt" ] && hint "file it: $N c mv $n <cat> · new one: $N cats add <cat> <description>"
+    [ -n "$alt" ] && hint "prefer $alt? $N c mv $n $alt"
     exit 0;;
   mv) [ "$A" = concepts ] || die "mv is for concepts"
-    [ $# -eq 2 ] || die "usage: zca c mv <ref> <cat>"
+    [ $# -eq 2 ] || die "usage: $N c mv <ref> <cat>"
     find_ln "$1"; need_cat "$2"
     e=$(sed -n "${ln}p" "$F")
     awk -v ln="$ln" 'NR!=ln' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
