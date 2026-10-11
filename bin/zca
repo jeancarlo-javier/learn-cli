@@ -1,0 +1,522 @@
+#!/bin/bash
+# zca: capture learnings/ideas/concepts as one-line markdown entries. Bash 3.2 safe.
+# Code only: each project keeps its data in the folder that holds its concepts.md.
+die() { echo "zca: $1 (use -h)" >&2; exit 2; }
+# tty: color + wrap to terminal width; pipe: plain one line per entry
+if [ -t 1 ] && [ -z "$NO_COLOR" ]; then
+  B=$'\e[1m' M=$'\e[2m' G=$'\e[32m' X=$'\e[0m' W=$(tput cols 2>/dev/null || echo 80)
+else W=0; fi
+# status line -> stderr, so stdout stays just entries
+say() { [ -t 2 ] && [ -z "$NO_COLOR" ] && echo "${G}✓${X} $1" >&2 || echo "$1" >&2; }
+hint() { echo "  $1" >&2; }
+# print entries as "#  id  date  text"; $1 = only this file line (default all), $2 = only this category
+# full lists of concepts print a header per category
+render() {
+  [ -f "$F" ] && awk -v only="${1:-0}" -v sect="$2" -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
+  /^## /{ cat = $2; next }
+  /^- \[/{ n++; if (only && NR != only) next; if (sect != "" && cat != sect) next
+    if (!only && sect == "" && cat != shown) { printf "%s%s%s%s\n", (shown != "" ? "\n" : ""), b, cat, x; shown = cat }
+    t = $0; sub(/^- \[[0-9]+\] [0-9-]+ ?/, "", t)
+    printf "%s%3d%s  %s%s  %s%s  ", b, n, x, m, substr($2,2,4), $3, x
+    ind = 23; if (w <= ind + 20) { print t; next }   # ponytail: byte width, accents wrap a bit early
+    k = split(t, ws, " "); col = 0
+    for (i = 1; i <= k; i++) {
+      if (col && col + 1 + length(ws[i]) > w - ind) { printf "\n%" ind "s", ""; col = 0 }
+      printf "%s%s", (col ? " " : ""), ws[i]; col += (col ? 1 : 0) + length(ws[i])
+    }
+    print "" }' "$F"
+}
+usage() { cat <<U
+usage: zca <learnings|l|ideas|i|concepts|c> [command]
+project: the nearest folder up from here with a concepts.md, else ZCA_HOME (ZCA_DIR overrides)
+       zca init <topic...>  start a project here, e.g. zca init machine learning
+  (none)              list entries
+  add <text...>       append an entry
+  edit <ref> <text..> replace text (keeps id, date)
+  rm <ref>            remove an entry
+concepts only:
+  add <text...> [-c <cat>]  file under <cat>; without -c, jev picks it
+  mv <ref> <cat>            move to another category
+       zca cats             categories with counts
+       zca cats <cat>       concepts in <cat>
+       zca cats add <cat> <description...> [--not <what belongs elsewhere>]
+                            (jev classifies by these descriptions)
+       zca cats rm <cat>    remove an empty category
+       zca learn [ref]      study due concepts with the AI (see zca ai): a lesson first
+                            while one is weak, then 3 questions; at a question Enter or ?
+                            shows the answer, q stops; Enter after a result goes to the next
+       zca ai [--model <id>] [--effort <e>] [--url <u>]   show or set the AI; '' or default clears one
+                            efforts: none|minimal|low|medium|high|xhigh
+                            else from env: LLM_MODEL LLM_EFFORT LLM_BASE_URL LLM_API_KEY (OPENAI_API_KEY for OpenAI)
+ref: 4 digits = id, 1-3 digits = # from list (learn also takes the text)
+U
+}
+case "$1" in -h|--help) [ $# -eq 1 ] || die "extra argument"; usage; exit 0;; esac
+if [ "$1" = init ]; then
+  shift; [ $# -ge 1 ] || die "usage: zca init <topic...>"
+  [ -f concepts.md ] && { echo "zca: concepts.md already here" >&2; exit 1; }
+  printf '# Concepts\n> topic: %s\n\n## inbox\n> Concepts not filed yet.\n' "$*" > concepts.md
+  say "zca project started in $PWD · add categories: zca cats add <cat> <description>"; exit 0
+fi
+D=$ZCA_DIR
+if [ -z "$D" ]; then
+  d=$PWD; while :; do [ -f "$d/concepts.md" ] && { D=$d; break; }; [ "$d" = / ] && break; d=$(dirname "$d"); done
+  D=${D:-$ZCA_HOME}  # outside any project: the default one
+  [ -n "$D" ] || { echo "zca: no concepts.md here or above · zca init <topic>, or set ZCA_DIR / ZCA_HOME" >&2; exit 1; }
+fi
+# learn + ai: code schedules (Leitner), the model teaches + grades. State in .zca-learn.json by
+# concept id, lessons cached forever in .zca-cards.json, model, effort and url in .zca-config.json.
+IFS= read -r -d '' py <<'PY' || :
+import difflib, json, os, re, shutil, sys, tempfile, textwrap, threading, urllib.error, urllib.request
+from datetime import date, timedelta
+D, mode, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+DAYS = [1, 3, 7, 16, 35, 90]  # ponytail: Leitner boxes, SM-2/FSRS if too blunt
+TOP = len(DAYS) - 1
+API, EFFORTS = "https://api.openai.com/v1", ("none", "minimal", "low", "medium", "high", "xhigh")
+SP, CP, CONF = f"{D}/.zca-learn.json", f"{D}/.zca-cards.json", f"{D}/.zca-config.json"
+if sys.stdin.isatty(): import readline  # line editing in answers
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+W = min(shutil.get_terminal_size((80, 24)).columns, 100) if sys.stdout.isatty() else 80
+today = date.today().isoformat()
+c = lambda code, s: f"\033[{code}m{s}\033[0m" if COLOR else s
+def die(m, fix="", code=1):
+    sys.stdout.flush(); print(f"zca: {m}" + (f" · {fix}" if fix else ""), file=sys.stderr); sys.exit(code)
+def out(text, ind=2, code=0, first=None):
+    """Wrap to the terminal; `first` replaces the indent of line one (e.g. a label)."""
+    pad, lines = " " * ind, []
+    for para in str(text).splitlines() or [""]:
+        lines += textwrap.wrap(para, max(W - ind, 30), break_long_words=False) or [""]
+    for i, l in enumerate(lines):
+        print((first if i == 0 and first is not None else pad) + (c(code, l) if code else l))
+def read(p, d):
+    try: v = json.load(open(p, encoding="utf-8"))
+    except (OSError, ValueError): return d
+    return v if isinstance(v, type(d)) else d
+def write(p, v):  # atomic: a crash never leaves half a file
+    fd, tmp = tempfile.mkstemp(dir=D)
+    with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(v, f, indent=1, ensure_ascii=False); f.write("\n")
+    os.replace(tmp, p)
+def keep(p, k, v):  # merge one key into the file as it is now: another session may have written meanwhile
+    d = read(p, {}); d[k] = v; write(p, d)
+
+def topic():  # "> topic: ..." under the title of concepts.md; software engineering otherwise
+    try: return next((l[9:].strip() for l in open(f"{D}/concepts.md", encoding="utf-8") if l.startswith("> topic: ")), None) or "software engineering"
+    except OSError: return "software engineering"
+def concepts():
+    out_, cat = [], None
+    try:
+        for line in open(f"{D}/concepts.md", encoding="utf-8"):
+            if line.startswith("## "): cat = line[3:].strip()
+            m = re.match(r"- \[(\d{4})\] \S+ (.*)", line)
+            if m: out_.append({"n": len(out_) + 1, "id": m[1], "text": m[2].strip(), "cat": cat})
+    except FileNotFoundError: pass
+    return out_
+effort = lambda: EFFORT or ("none" if re.match(r"gpt-(5\.[1-9]|[6-9])", MODEL) else None)  # ponytail: fastest effort where accepted
+is_due = lambda x, st: st.get(x["id"], {}).get("due", "") <= today  # never studied = due
+ahead = lambda cons, st: min((st[x["id"]]["due"] for x in cons if st.get(x["id"], {}).get("due")), default="")
+weak = lambda st: lambda x: (x["id"] not in st, st.get(x["id"], {}).get("box", 0), st.get(x["id"], {}).get("due", ""))
+def pick(cons, st, done, only_due=False):
+    pool = [x for x in cons if x["id"] not in done]
+    due = sorted((x for x in pool if is_due(x, st)), key=weak(st))  # weakest box, oldest due
+    return due[0] if due else None if only_due else min(pool, key=weak(st), default=None)
+def resolve(cons, ref):  # id, # or text (exact, then a unique substring)
+    hit = [x for x in cons if x["id"] == ref or (ref.isdigit() and len(ref) < 4 and x["n"] == int(ref))] \
+        or [x for x in cons if x["text"].casefold() == ref.casefold()] \
+        or [x for x in cons if ref.casefold() in x["text"].casefold()]
+    if len(hit) > 1: die(f"«{ref}» matches {len(hit)} concepts", "use its #: zca c")
+    return hit[0] if hit else die(f"no concept: {ref}", "zca c")
+
+# --- AI: every provider speaks the OpenAI chat format. Each setting on its own: saved (zca ai) > the shared
+# LLM_* env > default. The key follows the effective url, so a key never reaches another provider ---
+env = lambda n: os.environ.get(n) or None
+shared_effort = lambda: (lambda e: e if e in EFFORTS else None)((env("LLM_EFFORT") or "").strip().lower())  # unknown: never sent
+conf = read(CONF, {})
+def setup(cf):  # (re)compute the effective settings from a saved config
+    global MODEL, EFFORT, BASE, KEYVAR, KEY
+    MODEL = cf.get("model") or env("LLM_MODEL") or "gpt-6-luna"
+    EFFORT = cf.get("effort") or shared_effort()
+    BASE = (cf.get("url") or env("LLM_BASE_URL") or API).rstrip("/")
+    KEYVAR = "LLM_API_KEY" if BASE == (env("LLM_BASE_URL") or "").rstrip("/") else "OPENAI_API_KEY" if BASE == API else None
+    KEY = os.environ.get(KEYVAR or "", "")
+setup(conf)
+keyhint = lambda: f"export {KEYVAR}=…" if KEYVAR else f"no key goes to {BASE}: zca ai --url default, or export LLM_BASE_URL={BASE} LLM_API_KEY=…"
+ai_ready = lambda: bool(KEY) or bool(re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])([:/]|$)", BASE))  # only a local server needs no key
+def api(path, body=None):
+    h = {"Content-Type": "application/json", **({"Authorization": "Bearer " + KEY} if KEY else {})}
+    req = urllib.request.Request(BASE.rstrip("/") + path, json.dumps(body).encode() if body else None, h)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r: return json.load(r)
+    except urllib.error.HTTPError as e:
+        try: msg = json.load(e)["error"]["message"]
+        except Exception: msg = e.reason
+        raise RuntimeError(f"{e.code} {msg}")
+    except (OSError, ValueError) as e: raise RuntimeError(str(getattr(e, "reason", e)))
+def chat(ask):
+    body = {"model": MODEL,
+            "messages": [{"role": "system", "content": f"You are an expert in {topic()} tutoring a learner. Reply with JSON only."},
+                         {"role": "user", "content": ask}]}
+    if "anthropic.com" not in BASE: body["response_format"] = {"type": "json_object"}  # ponytail: Anthropic's OpenAI layer only takes a strict json_schema; the prompt asks for JSON
+    if effort(): body["reasoning_effort"] = effort()  # ponytail: the one vendor-specific field; a chosen effort goes to any model
+    c = api("/chat/completions", body)["choices"][0]["message"]["content"]
+    r = json.loads(c[c.find("{"):c.rfind("}") + 1])  # ponytail: drops ```json fences/prose when no response_format
+    if not isinstance(r, dict): raise ValueError("the model did not reply with an object")
+    return r
+s_ = lambda v: v.strip() if isinstance(v, str) else ""
+
+LESSON = """Concept: "{text}" (category: {cat}).
+Write a lesson that teaches it from zero to a learner who has never heard of it: concrete, no filler, nothing vague.
+The learner speaks Spanish; write in Spanish, keep technical terms in English.
+Reply with a JSON object with these keys:
+what: what it is, 1-2 plain sentences; explain any jargon you use
+why: the problem it solves - what goes wrong without it, 1-2 sentences
+how: how it works in practice, 2-3 sentences
+example: one concrete real-world scenario showing it applied, 2-4 sentences; add a code snippet (max 6 lines) only if clearer
+tradeoffs: list of 2-3 short strings, each a cost or limit, or when it is not worth it
+confuse: the concept it is most often confused with and the difference in one line, or ""
+remember: one line the learner can recall in an interview"""
+def lesson(w):  # pay once: cached until the concept's text changes
+    k = read(CP, {}).get(w["id"])
+    if k and k.get("text") == w["text"]: return k
+    print(c(2, f"  writing the lesson with {MODEL}…"))
+    r = chat(LESSON.format(**w))
+    k = {f: s_(r.get(f)) for f in ("what", "why", "how", "example", "confuse", "remember")}
+    k["tradeoffs"] = [s_(t) for t in r.get("tradeoffs", []) if s_(t)][:3] if isinstance(r.get("tradeoffs"), list) else []
+    if not k["what"]: raise ValueError("the model returned no lesson")
+    k["text"] = w["text"]; keep(CP, w["id"], k)
+    return k
+def show_lesson(k):
+    print()
+    for label, text in [(f, k[f]) for f in ("what", "why", "how", "example")] + [
+            ("trade-offs", "\n".join("· " + t for t in k["tradeoffs"])), ("vs", k["confuse"]), ("remember", k["remember"])]:
+        if text: out(text, 14, 32 if label == "remember" else 0, first="  " + c(1, f"{label:<12}"))
+
+def head(w, me):  # per-session context; the lesson stays context-free so its cache holds
+    return (f'Concept: "{w["text"]}" (category: {w["cat"]}). Learner mastery: box {me.get("box", 0)} of {TOP}.\n'
+            + (f"Your note from last time: {me['note']}\n" if me.get("note") else "")
+            + "The learner speaks Spanish; write in Spanish, keep technical terms in English.\n")
+def questions(hd):
+    r = chat(hd + "Design 3 short open questions, easy to hard: 1) what it is, 2) when to use it and its main trade-off, "
+             "3) a concrete scenario where the learner must apply it. Vary them from earlier sessions.\n"
+             "For each, the reference answer a solid learner would give: 1-3 concrete sentences.\n"
+             'Reply {"questions": [{"q": "...", "a": "..."}, ...]}')
+    qs = [(s_(q.get("q")), s_(q.get("a"))) for q in r.get("questions", []) if isinstance(q, dict) and s_(q.get("q"))][:3]
+    if not qs: raise ValueError("the model returned no questions")
+    return qs
+def grade(hd, qs, ans):
+    g = chat(hd + "\n".join(f"Q{i}: {q}\nReference: {a}\nLearner: {x or '(no answer)'}" for i, ((q, a), x) in enumerate(zip(qs, ans), 1))
+             + "\nGrade honestly against the references. Reply with a JSON object:\n"
+               "score: 0 (doesn't know it) | 1 (partial) | 2 (solid)\n"
+               'per: one item per question, {"ok": 0 | 1 | 2, "fix": "what was missing or wrong and the correct idea, 1-2 sentences; empty when ok is 2"}\n'
+               "feedback: 1-2 sentences on what the learner actually wrote: what was right, the key idea missing\n"
+               "note: one line for your future self: what to probe next time")
+    per = [p for p in g.get("per", []) if isinstance(p, dict)] if isinstance(g.get("per"), list) else []
+    lvl = lambda v: int(v) if type(v) in (int, float) and v in (0, 1, 2) else 1
+    return {"score": lvl(g.get("score")), "feedback": s_(g.get("feedback")), "note": s_(g.get("note")),
+            "per": [(lvl(p.get("ok")), s_(p.get("fix"))) for p in per] if len(per) == len(qs) else []}
+
+def need(fn, w):  # a model call, or die naming what fixes it
+    try: return fn()
+    except Exception as e:
+        m = str(e)
+        die(f"AI unavailable ({m})", ("unset LLM_EFFORT" if shared_effort() and not conf.get("effort") else "zca ai --effort default") if "reasoning" in m.lower() else keyhint() if m[:3] == "401"
+            else f"check credits or wait, then zca learn {w['n']}" if m[:3] == "429" else "zca ai --model <id>" if m[:3] in ("400", "404")
+            else f"retry: zca learn {w['n']}")
+def later(fn):  # the model writes the questions while the learner reads
+    box = {}
+    def run():
+        try: box["v"] = fn()
+        except Exception as e: box["e"] = e
+    t = threading.Thread(target=run, daemon=True); t.start()
+    def wait():
+        if t.is_alive(): print(c(2, f"  preparing questions with {MODEL}…")); t.join()
+        if "e" in box: raise box["e"]
+        return box["v"]
+    return wait
+def ask(p):
+    x = input(p).strip()
+    if not sys.stdin.isatty(): print()
+    return x
+
+def study(w):
+    """One concept: lesson first while it is weak, 3 questions, grade. Returns the score, None on q."""
+    me = read(SP, {}).get(w["id"], {})
+    box, was_due = me.get("box", 0), me.get("due", "") <= today
+    tag = "new" if not me else "due" if was_due else f"early · due {me['due']}"
+    print(f"\n  {c(1, w['text'])} " + c(2, f"· {w['cat']} · box {box}/{TOP} · {tag}"))
+    hd = head(w, me)
+    quiz, shown = later(lambda: questions(hd)), False
+    if box == 0:  # new or not known yet: teach before testing
+        show_lesson(need(lambda: lesson(w), w)); shown = True
+        if ask(c(2, "\n  Enter: questions · q: stop ")) == "q": return None
+    qs, ans, peek, quit_ = need(quiz, w), [], False, False
+    for i, (q, a) in enumerate(qs, 1):
+        print(); out(q, 7, first=f"  {c(1, f'{i}/{len(qs)}')}  ")
+        x = ask("   > ")
+        if x == "q":
+            if not peek: return None
+            quit_ = True; break  # seen answers count as not known, or the drop could be dodged
+        if x in ("", "?"):  # don't know: answer now, while it matters
+            x, peek = "", True; a and out("→ " + a, 5, 2)
+        ans.append(x)
+    ans += [""] * (len(qs) - len(ans))
+    if any(ans) and not quit_:
+        print(c(2, "\n  grading…")); g = need(lambda: grade(hd, qs, ans), w)
+    else:  # nothing to grade: 0 tokens
+        g = {"score": 0, "per": [], "note": me.get("note", ""),
+             "feedback": "Sin respuestas todavía: las respuestas de arriba son las ideas clave." if shown else "Sin respuestas todavía: aquí va la lección."}
+    print()
+    for i, (x, (ok, fix)) in enumerate(zip(ans, g["per"]), 1):
+        if x: out(fix or ("ok" if ok == 2 else "-"), 9, 0 if fix else 2, first=f"  {c((31, 33, 32)[ok], '✗~✓'[ok])} {i}/{len(qs)}  ")
+    score = min(g["score"], 1) if peek else g["score"]  # a seen answer is not a solid recall
+    # spacing is never gamed: a box rises only when the concept was due; drops always count
+    nbox = 0 if score == 0 else min(box + 1, TOP) if score == 2 and was_due else box
+    nxt = me["due"] if score and not was_due else (date.today() + timedelta(DAYS[nbox])).isoformat()
+    keep(SP, w["id"], {"box": nbox, "due": nxt, "note": g["note"][:300] or me.get("note", ""), "last": today})
+    out(g["feedback"], 11, first=f"  {[c(31, 'not yet'), c(33, 'partial'), c(32, 'solid  ')][score]}  ")
+    if score == 0 and not shown:  # not known: teach it now, not a vague hint
+        show_lesson(need(lambda: lesson(w), w))
+    print(c(2, f"  box {nbox}/{TOP} · next {nxt}" + (" (early practice keeps the schedule)" if score and not was_due else "")))
+    return score
+
+def learn():
+    cons = concepts() or die("no concepts yet", "zca c add <text>")
+    if not ai_ready(): die("learn needs " + (KEYVAR or f"a key for {BASE}"), keyhint())
+    done, got = set(), []
+    st = read(SP, {})
+    w = resolve(cons, " ".join(args)) if args else pick(cons, st, done)
+    if not args and not is_due(w, st): print(c(2, f"  nothing due · practising early ({ahead(cons, st)})"))
+    try:
+        run(w, done, got)
+    finally:
+        if len(got) > 1:
+            print(c(2, f"\n  {len(got)} concepts · " + " · ".join(f"{got.count(s)} {n}" for s, n in ((2, "solid"), (1, "partial"), (0, "not yet")) if got.count(s))))
+def run(w, done, got):
+    while w:
+        score = study(w)
+        if score is None: break
+        done.add(w["id"]); got.append(score)
+        cons, st = concepts(), read(SP, {})
+        w = pick(cons, st, done, only_due=True)
+        if not w:
+            a = ahead(cons, st); print(c(2, "\n  all caught up" + (f" · next review {a}" if a else ""))); break
+        try:
+            if ask(c(2, f"\n  Enter: next ({w['text']}) · q: stop ")) == "q": break
+        except EOFError: print(); break
+
+def ai():  # zca ai [--model <id>] [--effort <e>] [--url <u>]: all validated before anything is written
+    opts = {k: ("" if v.strip().lower() in ("", "default") else v.strip()) for k, v in zip(args[::2], args[1::2])}  # "" clears
+    if len(args) % 2 or set(opts) - {"--model", "--effort", "--url"}: die("usage: zca ai [--model <id>] [--effort <e>] [--url <u>]", code=2)
+    new = dict(conf)
+    if "--effort" in opts:
+        e = opts["--effort"].lower()
+        if e and e not in EFFORTS: die(f"unknown effort: {e}", " | ".join(EFFORTS) + " | default", 2)
+        new["effort"] = e or None
+    if "--url" in opts:
+        u = opts["--url"].rstrip("/")
+        if u and not re.match(r"https?://\S", u): die(f"bad url: {u}", "it must start with http:// or https://", 2)
+        new["url"] = u or None
+    if "--model" in opts:
+        m = new["model"] = opts["--model"] or None
+        setup(new)  # the effective url, key and model of this call, --url included
+        if m:
+            if not ai_ready(): die("choosing a model needs the API", keyhint())
+            try: models = [x["id"] for x in api("/models")["data"]]
+            except (RuntimeError, LookupError, TypeError) as e: die(f"could not list models ({e})", "nothing changed")
+            if m not in models:
+                near = difflib.get_close_matches(m, models, n=8, cutoff=0.4) or sorted(models)[:8]
+                die(f"no model {m}", "close: " + ", ".join(near) + " · nothing changed")
+    if opts:
+        write(CONF, {k: v for k, v in new.items() if v})
+        setup(new)
+    lbl = lambda saved, var, name: "" if saved else c(2, f"   (set by {name})") if var else c(2, "   (default)")
+    print(f"model   {MODEL}" + lbl(new.get("model"), env("LLM_MODEL"), "LLM_MODEL"))
+    print(f"effort  {effort() or '-'}" + lbl(new.get("effort"), shared_effort(), "LLM_EFFORT"))
+    print(f"api     {BASE}" + lbl(new.get("url"), env("LLM_BASE_URL"), "LLM_BASE_URL") + " · "
+          + (f"{KEYVAR} " + ("set" if KEY else c(31, "missing")) if KEYVAR else c(2, "none") if ai_ready() else c(31, "key missing")))
+
+def due():  # one row for the bare zca overview, 0 tokens
+    cons, st = concepts(), read(SP, {})
+    if not cons: return
+    n = sum(is_due(x, st) for x in cons)
+    tail = f"{n} due today · zca learn" if n else f"all caught up · next {ahead(cons, st)[5:]}"
+    print(f"    {'learn':<10} {n:>3}  {c(2, tail)}")
+
+try: {"learn": learn, "ai": ai, "due": due}[mode]()
+except (KeyboardInterrupt, EOFError): print(); sys.exit(130)
+PY
+# bare zca: overview of every area (count, newest entry, inbox backlog) + how to go on
+if [ $# -eq 0 ]; then
+  for a in learnings ideas concepts; do
+    f=$D/$a.md; [ -f "$f" ] || f=/dev/null
+    awk -v a="$a" -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
+    /^## /{ cat = $2 } /^- \[/{ n++; if ($3 >= d) { d = $3; t = $0 } if (cat == "inbox") ib++ }
+    END{ sub(/^- \[[0-9]+\] [0-9-]+ ?/, "", t)
+      tail = n ? substr(d, 6) "  " t : "empty · zca " substr(a, 1, 1) " add <text>"
+      if (ib) tail = ib " in inbox · " tail
+      if (w && 22 + length(tail) > w) tail = substr(tail, 1, w - 23) "…"
+      printf "  %s%s%s %-10s %3d  %s%s%s\n", b, substr(a, 1, 1), x, a, n, m, tail, x }' "$f"
+  done
+  python3 -c "$py" "$D" due
+  hint "${M}list: zca <l|i|c> · add: zca <l|i|c> add <text> · zca cats · zca learn · zca -h${X}"
+  exit 0
+fi
+case "$1" in
+  learn|ai) [ "$2" = -h ] && { usage; exit 0; }; exec python3 -c "$py" "$D" "$@";;
+  learnings|l) A=learnings H="# Learnings";;
+  ideas|i) A=ideas H="# Ideas";;
+  concepts|concept|c|cats) A=concepts;;
+  "") die "missing area";;
+  *) die "unknown area: $1";;
+esac
+F=$D/$A.md; area=$1; shift
+[ "$1" = -h ] && { [ $# -eq 1 ] || die "extra argument"; usage; exit 0; }
+cmd=$1; [ $# -gt 0 ] && shift
+# ref -> file line number of the entry (exit 2 if malformed, 1 if unknown)
+find_ln() {
+  case "$1" in ''|*[!0-9]*|?????*) die "bad ref: $1";; esac
+  [ -f "$F" ] && ln=$(awk -v r="$1" '/^- \[/{n++; id=substr($2,2,4);
+    if ((length(r)==4 && id==r) || (length(r)<4 && n+0==r+0)) {print NR; exit}}' "$F")
+  [ -n "$ln" ] || { echo "zca: no entry: $1" >&2; exit 1; }
+}
+
+# --- concepts: "## <cat>" sections with a "> description" line jev reads ---
+seed() {
+  [ -f "$F" ] && return
+  cat > "$F" <<'SEED'
+# Concepts
+
+## inbox
+> Concepts not filed yet.
+SEED
+}
+cat_exists() { grep -qx "## $1" "$F" 2>/dev/null; }
+need_cat() { cat_exists "$1" || { echo "zca: unknown category: $1 · zca cats" >&2; exit 2; }; }
+# insert line $2 at the end of category $1; sets ln = its file line
+put_in() {
+  local at gap  # gap: keep a blank line between the description and the first entry
+  read at gap <<< "$(awk -v c="## $1" '$0==c{s=1; last=NR; g=0; next} s&&/^## /{exit} s&&NF{last=NR; g=/^>/} END{print last, g+0}' "$F")"
+  E="$2" awk -v at="$at" -v gap="$gap" '{print} NR==at{if (gap) print ""; print ENVIRON["E"]}' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+  ln=$((at + 1 + gap))
+}
+# jev: classify $1 into a category -> prints "cat conf alt alt_p" or "! reason"
+jev() {
+  [ -n "$TYPESAFE_API_KEY" ] || { echo "! no TYPESAFE_API_KEY"; return; }
+  python3 - "$1" "$F" <<'PY'
+# prompt shape picked by brute-force eval (focus + what/not_for, no map examples): 71/71 held-out
+import json, sys, os, urllib.request
+text, path = sys.argv[1], sys.argv[2]
+cats, cur, topic = {}, None, "software engineering"
+for line in open(path, encoding="utf-8"):
+    if not cur and line.startswith("> topic: "): topic = line[9:].strip() or topic
+    elif line.startswith("## "): cur = line[3:].strip(); cats[cur] = {}
+    elif cur and line.startswith("> not: "): cats[cur]["not_for"] = line[7:].strip()
+    elif cur and line.startswith("> "): cats[cur]["what"] = line[2:].strip()
+cats.pop("inbox", None)
+cats["none"] = {"what": f"Anything that is not a {topic} concept (errands, personal notes, gibberish), or a {topic} concept none of the other categories cover."}
+body = {"model": "jev-latest", "state": {"concept": text}, "questions": {"cat": {"type": "choice",
+    "instructions": {"question": f"Which category of this personal map of {topic} concepts best fits the concept in `concept`?",
+                     "focus": f"Classify what the concept is about. Names are often acronyms or short labels; read them in their usual {topic} sense."},
+    "criteria": cats}}}
+req = urllib.request.Request("https://api.typesafe.ai/v1/systemone", json.dumps(body).encode(),
+    {"Authorization": "Bearer " + os.environ["TYPESAFE_API_KEY"], "Content-Type": "application/json"})
+try:
+    a = json.load(urllib.request.urlopen(req, timeout=15))["answers"]["cat"]
+except Exception as e:
+    print("! jev unavailable (%s)" % (getattr(e, "code", None) or type(e).__name__)); sys.exit()
+ps = sorted(a["probabilities"].items(), key=lambda kv: -kv[1])
+alt = ps[1] if len(ps) > 1 else ("-", 0)
+print(a["choice"], "%.2f" % a["confidence"], alt[0], "%.2f" % alt[1])
+PY
+}
+
+if [ "$area" = cats ]; then
+  seed
+  case "$cmd" in
+    "") awk -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
+      function out() { if (c != "") { line = sprintf("%-14s %3d  %s", c, n, d)
+        if (w && length(line) > w) line = substr(line, 1, w - 1) "…"
+        printf "%s%-14s%s %3d  %s%s%s\n", b, c, x, n, m, substr(line, 20), x } }
+      /^## /{ out(); c = $2; n = 0; d = ""; next } /^> / && !/^> not: /{ d = substr($0, 3) } /^- \[/{ n++ } END{ out() }' "$F";;
+    add) c=$1; [ $# -gt 0 ] && shift; not=; args=()
+      while [ $# -gt 0 ]; do
+        case "$1" in --not) [ -n "$2" ] || die "missing --not text"; not=$2; shift 2;; *) args+=("$1"); shift;; esac
+      done
+      [ -n "$c" ] && [ ${#args[@]} -ge 1 ] || die "usage: zca cats add <cat> <description...> [--not <text>]"
+      echo "$c" | grep -qE '^[a-z0-9]+(-[a-z0-9]+)*$' || die "category must be kebab-case: $c"
+      cat_exists "$c" && { echo "zca: category exists: $c" >&2; exit 1; }
+      printf '\n## %s\n> %s\n' "$c" "${args[*]}" >> "$F"
+      [ -n "$not" ] && printf '> not: %s\n' "$not" >> "$F"
+      say "category added: $c ${M}(jev reads its description; edit it in concepts.md to steer)${X}";;
+    rm) [ $# -eq 1 ] || die "usage: zca cats rm <cat>"
+      need_cat "$1"; [ "$1" = inbox ] && die "inbox is the fallback, it stays"
+      n=$(render 0 "$1" | grep -c .)
+      [ "$n" -eq 0 ] || { echo "zca: $1 has $n concepts · move them first: zca c mv <ref> <cat>" >&2; exit 1; }
+      awk -v c="## $1" '$0==c{s=1; next} s&&/^## /{s=0} !s' "$F" | cat -s > "$F.tmp" && mv "$F.tmp" "$F"
+      say "category removed: $1";;
+    -*) die "unknown option: $cmd";;
+    *) [ $# -eq 0 ] || die "extra argument"; need_cat "$cmd"
+      render 0 "$cmd" | grep -q . || { echo "no concepts in $cmd yet" >&2; exit 0; }
+      render 0 "$cmd";;
+  esac
+  exit 0
+fi
+
+case "$cmd" in
+  "") grep -q '^- \[' "$F" 2>/dev/null || { echo "no $A yet · zca $area add <text>" >&2; exit 0; }
+    render;;
+  add) cat=; args=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -c|--category) [ "$A" = concepts ] || die "--category is for concepts"
+          [ -n "$2" ] || die "missing category"; cat=$2; shift 2;;
+        *) args+=("$1"); shift;;
+      esac
+    done
+    [ ${#args[@]} -ge 1 ] || die "missing text"
+    T="${args[*]}"
+    while :; do id=$((RANDOM % 9000 + 1000)); grep -q "^- \[$id\]" "$F" 2>/dev/null || break; done
+    E="- [$id] $(date +%Y-%m-%d) $T"
+    if [ "$A" != concepts ]; then
+      [ -f "$F" ] || printf '%s\n\n' "$H" > "$F"
+      printf '%s\n' "$E" >> "$F"
+      say "added to $A"; render "$(wc -l < "$F")"; exit 0
+    fi
+    seed
+    # a concept is mapped once: same name (case-insensitive) -> show the existing one
+    dup=$(T="$T" awk '/^- \[/{n++; t=$0; sub(/^- \[[0-9]+\] [0-9-]+ ?/,"",t); if (tolower(t)==tolower(ENVIRON["T"])) {print NR; exit}}' "$F")
+    [ -n "$dup" ] && { echo "zca: already mapped" >&2; render "$dup"; exit 1; }
+    [ -n "$cat" ] && need_cat "$cat"
+    note= alt=
+    if [ -z "$cat" ]; then
+      [ -t 2 ] && printf '%s' "${M}jev…${X}" >&2
+      r=$(jev "$T" 2>/dev/null); [ -t 2 ] && printf '\r\033[K' >&2
+      set -- ${r:-! jev failed}
+      if [ "$1" = '!' ]; then shift; cat=inbox note="($*)"
+      elif [ "$1" = none ] || ! cat_exists "$1"; then cat=inbox note="(jev: no category fits)"
+      # second option >= 0.25 = genuinely cross-cutting concept (eval: ~15% of adds, e.g. CRDT cs/data)
+      else cat=$1 note="(jev $2)"; awk -v p="$4" 'BEGIN{exit !(p >= 0.25)}' && [ "$3" != none ] && note="(jev $2 · also fits $3 $4)" alt=$3
+      fi
+    fi
+    put_in "$cat" "$E"
+    say "added to concepts → ${B}$cat${X} ${M}$note${X}"; render "$ln"
+    n=$(awk -v ln="$ln" '/^- \[/{n++} NR==ln{print n; exit}' "$F")
+    [ "$cat" = inbox ] && [ -z "$alt" ] && hint "file it: zca c mv $n <cat> · new one: zca cats add <cat> <description>"
+    [ -n "$alt" ] && hint "prefer $alt? zca c mv $n $alt"
+    exit 0;;
+  mv) [ "$A" = concepts ] || die "mv is for concepts"
+    [ $# -eq 2 ] || die "usage: zca c mv <ref> <cat>"
+    find_ln "$1"; need_cat "$2"
+    e=$(sed -n "${ln}p" "$F")
+    awk -v ln="$ln" 'NR!=ln' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    put_in "$2" "$e"
+    say "moved → ${B}$2${X}"; render "$ln";;
+  edit) [ $# -ge 2 ] || die "missing argument"
+    find_ln "$1"; shift
+    T="$*" awk -v ln="$ln" 'NR==ln{match($0,/^- \[[0-9]+\] [0-9-]+/); print substr($0,1,RLENGTH) " " ENVIRON["T"]; next} {print}' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    say "edited"; render "$ln";;
+  rm) [ $# -ge 1 ] || die "missing argument"; [ $# -eq 1 ] || die "extra argument"
+    find_ln "$1"
+    say "removed (numbers below it shift up)"; render "$ln"
+    awk -v ln="$ln" 'NR!=ln' "$F" > "$F.tmp" && mv "$F.tmp" "$F";;
+  *) die "unknown command: $cmd";;
+esac
