@@ -4,9 +4,10 @@
 # LEARN_DIR=<project>/.learn-cli and LEARN_NAME=<command>, and manages that project's entries.
 N=${LEARN_NAME:-learn-cli}
 die() { echo "$N: $1 (use -h)" >&2; exit 2; }
-# tty: color + wrap to terminal width; pipe: plain one line per entry
+# tty: color + wrap to terminal width; pipe: plain one line per entry (+ one indented description line)
 if [ -t 1 ] && [ -z "$NO_COLOR" ]; then
-  B=$'\e[1m' M=$'\e[2m' G=$'\e[32m' X=$'\e[0m' W=$(tput cols 2>/dev/null || echo 80)
+  B=$'\e[1m' M=$'\e[2m' G=$'\e[32m' X=$'\e[0m'
+  W=$(stty size </dev/tty 2>/dev/null); W=${W#* }; [ -n "$W" ] || W=80  # not tput: in $( ) with 2>/dev/null it sees no tty, says 80
 else W=0; fi
 # status line -> stderr, so stdout stays just entries
 say() { [ -t 2 ] && [ -z "$NO_COLOR" ] && echo "${G}✓${X} $1" >&2 || echo "$1" >&2; }
@@ -15,18 +16,23 @@ hint() { echo "  $1" >&2; }
 # full lists of concepts print a header per category
 render() {
   [ -f "$F" ] && awk -v only="${1:-0}" -v sect="$2" -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
-  /^## /{ cat = $2; next }
-  /^- \[/{ n++; if (only && NR != only) next; if (sect != "" && cat != sect) next
-    if (!only && sect == "" && cat != shown) { printf "%s%s%s%s\n", (shown != "" ? "\n" : ""), b, cat, x; shown = cat }
-    t = $0; sub(/^- \[[0-9]+\] [0-9-]+ ?/, "", t)
-    printf "%s%3d%s  %s%s  %s%s  ", b, n, x, m, substr($2,2,4), $3, x
-    ind = 23; if (w <= ind + 20) { print t; next }   # ponytail: byte width, accents wrap a bit early
+  function wrap(t,   k, i, col, ws) {  # rest of the line at column ind, wrapped to w
+    if (w <= ind + 20) { print t; return }   # ponytail: byte width, accents wrap a bit early
     k = split(t, ws, " "); col = 0
     for (i = 1; i <= k; i++) {
       if (col && col + 1 + length(ws[i]) > w - ind) { printf "\n%" ind "s", ""; col = 0 }
       printf "%s%s", (col ? " " : ""), ws[i]; col += (col ? 1 : 0) + length(ws[i])
     }
-    print "" }' "$F"
+    print "" }
+  BEGIN{ ind = 23 }
+  /^## /{ cat = $2; next }
+  /^- \[/{ n++; ok = 0; if (only && NR != only) next; if (sect != "" && cat != sect) next
+    if (!only && sect == "" && cat != shown) { printf "%s%s%s%s\n", (shown != "" ? "\n" : ""), b, cat, x; shown = cat }
+    t = $0; sub(/^- \[[0-9]+\] [0-9-]+ ?/, "", t)
+    printf "%s%3d%s  %s%s  %s%s  ", b, n, x, m, substr($2,2,4), $3, x
+    wrap(t); ok = 1; next }
+  /^  [^ ]/ && ok { printf "%" ind "s%s", "", m; wrap(substr($0, 3) x) }  # a concept'"'"'s description
+  { ok = 0 }' "$F"
 }
 # --- learn-cli itself (no LEARN_DIR) manages projects; a project's command manages its entries ---
 BIN=${LEARN_BIN:-$HOME/.local/bin}
@@ -41,6 +47,13 @@ free_cmd() {
   { [ -e "$BIN/$1" ] || command -v "$1" >/dev/null; } && { echo "learn-cli: command $1 already exists" >&2; exit 1; }
 }
 need_proj() { is_proj "$1" || { echo "learn-cli: no project: $1 · learn-cli ls" >&2; exit 1; }; }
+# set "> $1: $2" in the header of concepts.md $3 (title + its "> " lines); empty $2 removes it
+set_meta() {
+  [ -f "$3" ] || printf '# Concepts\n' > "$3"
+  K="> $1: " V="$2" awk 'BEGIN{K=ENVIRON["K"]; V=ENVIRON["V"]}
+    NR==1{print; hdr=1; next} hdr && index($0, K)==1{next} hdr && /^> /{print; next}
+    hdr{if (V != "") print K V; hdr=0; added=1} {print} END{if (!added && V != "") print K V}' "$3" > "$3.tmp" && mv "$3.tmp" "$3"
+}
 manager_usage() { cat <<U
 ${B}learn-cli${X}: manage learning projects. Each project gets its own command (zca, mll, …)
 that works from any folder; its data lives in <project folder>/.learn-cli/.
@@ -97,23 +110,21 @@ if [ -z "$LEARN_DIR" ]; then
         --name) [ $# -eq 2 ] || die "usage: learn-cli edit <cmd> --name <new>"
           free_cmd "$2"
           write_cmd "$2" "$d" && rm "$BIN/$p"; say "renamed: $p → $2";;
-        --topic) shift; t="$*"; f=$d/concepts.md
-          if grep -q '^> topic: ' "$f"; then T="$t" awk '/^> topic: / && !done {print "> topic: " ENVIRON["T"]; done=1; next} {print}' "$f" > "$f.tmp"
-          else T="$t" awk 'NR==1{print; print "> topic: " ENVIRON["T"]; next} {print}' "$f" > "$f.tmp"; fi
-          mv "$f.tmp" "$f"; say "$p topic: $t";;
+        --topic) shift; set_meta topic "$*" "$d/concepts.md"; say "$p topic: $*";;
         *) die "unknown option: $1";;
       esac;;
     rm) [ $# -eq 1 ] || die "usage: learn-cli rm <cmd>"
       need_proj "$1"; d=$(dir_of "$1"); rm "$BIN/$1"
       say "removed the command $1 · data kept in $d"
       hint "back: learn-cli add $1 <topic> --dir ${d%/.learn-cli} · delete for good: rm -r $d";;
-    l|learnings|i|ideas|c|concepts|cats|learn|ai) echo "learn-cli: $cmd runs inside a project: <cmd> $cmd · projects: learn-cli ls" >&2; exit 2;;
+    l|learnings|i|ideas|c|concepts|cats|learn|ai|ask|goal) echo "learn-cli: $cmd runs inside a project: <cmd> $cmd · projects: learn-cli ls" >&2; exit 2;;
     *) die "unknown command: $cmd";;
   esac
   exit 0
 fi
 D=$LEARN_DIR
 export TOPIC=$(sed -n 's/^> topic: //p' "$D/concepts.md" 2>/dev/null | head -1)  # the python parts read it too
+export GOAL=$(sed -n 's/^> goal: //p' "$D/concepts.md" 2>/dev/null | head -1)
 usage() { cat <<U
 ${B}$N${X}: learnings, ideas and concepts on $TOPIC, with an AI tutor
 ${M}data: $D · projects: learn-cli -h${X}
@@ -130,7 +141,9 @@ ${B}entries${X} (any area)
                                   ref: 4 digits = id, 1-3 digits = # from the list
 
 ${B}concepts${X}
-  $N c add <text...> [-c <cat>]   file under <cat>; without -c, jev picks one
+  $N c add <text...> [-c <cat>] [-d <desc>]
+                                  file under <cat>; without -c, jev picks one;
+                                  without -d, the AI tutor writes a one-line description
   $N c mv <ref> <cat>             move to another category
   $N cats                         categories with counts
   $N cats <cat>                   concepts in <cat>
@@ -138,9 +151,19 @@ ${B}concepts${X}
                                   jev files concepts by these descriptions
   $N cats rm <cat>                remove an empty category
 
+${B}goal${X} (why you study this: shown in the overview and by learn, the tutor aims at it)
+  $N goal                         show it
+  $N goal <text...>               set it
+  $N goal rm                      clear it
+
 ${B}study${X}
-  $N learn [ref|text]             due concepts: a lesson while one is weak, then 3 questions;
+  $N learn [ref|text]            due concepts: a lesson while one is weak, then 3 questions;
                                   at a question Enter or ? shows the answer, q stops
+  $N ask [question...]            ask the tutor anything: it knows this project's concepts
+                                  (and how well you know them), learnings, ideas and goal;
+                                  follow up in the same thread, Enter quits;
+                                  /c [concept] /l <text> /i <text> save without leaving
+                                  (/c alone saves the concept the tutor suggested)
   $N ai                           show the AI settings
   $N ai [--model <id>] [--effort <e>] [--url <u>]
                                   set them; '' or default clears one
@@ -153,7 +176,7 @@ case "$1" in -h|--help) [ $# -eq 1 ] || die "extra argument"; usage; exit 0;; es
 # learn + ai: code schedules (Leitner), the model teaches + grades. State in state.json by
 # concept id, lessons cached forever in cards.json, model, effort and url in config.json.
 IFS= read -r -d '' py <<'PY' || :
-import difflib, json, os, re, shutil, sys, tempfile, textwrap, threading, urllib.error, urllib.request
+import difflib, json, os, re, shutil, subprocess, sys, tempfile, textwrap, threading, urllib.error, urllib.request
 from datetime import date, timedelta
 D, mode, args = sys.argv[1], sys.argv[2], sys.argv[3:]
 DAYS = [1, 3, 7, 16, 35, 90]  # ponytail: Leitner boxes, SM-2/FSRS if too blunt
@@ -187,12 +210,14 @@ def keep(p, k, v):  # merge one key into the file as it is now: another session 
     d = read(p, {}); d[k] = v; write(p, d)
 
 def concepts():
-    out_, cat = [], None
+    out_, cat, prev = [], None, False
     try:
         for line in open(f"{D}/concepts.md", encoding="utf-8"):
             if line.startswith("## "): cat = line[3:].strip()
             m = re.match(r"- \[(\d{4})\] \S+ (.*)", line)
-            if m: out_.append({"n": len(out_) + 1, "id": m[1], "text": m[2].strip(), "cat": cat})
+            if m: out_.append({"n": len(out_) + 1, "id": m[1], "text": m[2].strip(), "cat": cat, "desc": ""})
+            elif re.match(r"  \S", line) and prev: out_[-1]["desc"] = line.strip()  # its description line
+            prev = bool(m)
     except FileNotFoundError: pass
     return out_
 effort = lambda: EFFORT or ("none" if re.match(r"gpt-(5\.[1-9]|[6-9])", MODEL) else None)  # ponytail: fastest effort where accepted
@@ -237,7 +262,9 @@ def api(path, body=None):
     except (OSError, ValueError) as e: raise RuntimeError(str(getattr(e, "reason", e)))
 def chat(ask):
     body = {"model": MODEL,
-            "messages": [{"role": "system", "content": f"You are an expert in {os.environ["TOPIC"]} tutoring a learner. Reply with JSON only."},
+            "messages": [{"role": "system", "content": f"You are an expert in {os.environ["TOPIC"]} tutoring a learner. "
+                          + (f"The learner's goal: {os.environ["GOAL"]}. Aim examples and questions at it. " if os.environ.get("GOAL") else "")
+                          + "Reply with JSON only."},
                          {"role": "user", "content": ask}]}
     if "anthropic.com" not in BASE: body["response_format"] = {"type": "json_object"}  # ponytail: Anthropic's OpenAI layer only takes a strict json_schema; the prompt asks for JSON
     if effort(): body["reasoning_effort"] = effort()  # ponytail: the one vendor-specific field; a chosen effort goes to any model
@@ -367,6 +394,7 @@ def learn():
     if not ai_ready(): die("learn needs " + (KEYVAR or f"a key for {BASE}"), keyhint())
     done, got = set(), []
     st = read(SP, {})
+    if os.environ.get("GOAL"): out(os.environ["GOAL"], 8, 2, first="  " + c(1, "goal  "))
     w = resolve(cons, " ".join(args)) if args else pick(cons, st, done)
     if not args and not is_due(w, st): print(c(2, f"  nothing due · practising early ({ahead(cons, st)})"))
     try:
@@ -425,11 +453,96 @@ def due():  # one row for the bare {N} overview, 0 tokens
     tail = f"{n} due today · {N} learn" if n else f"all caught up · next {ahead(cons, st)[5:]}"
     print(f"    {'learn':<10} {n:>3}  {c(2, tail)}")
 
-try: {"learn": learn, "ai": ai, "due": due}[mode]()
+def describe():  # {N} c add without -d: one line under the concept, or the reason on stderr (exit 1)
+    if not ai_ready(): die("no " + (KEYVAR or "key"))
+    try: r = chat(f'Concept: "{args[0]}". Define it for this learner in one plain sentence, max 20 words, in Spanish; '
+                  'keep technical terms in English. Reply {"desc": "..."}')
+    except Exception as e: die(f"AI unavailable: {str(e)[:60]}")
+    d = " ".join(s_(r.get("desc")).split())
+    print(d) if d else die("the model returned none")
+
+# --- ask: a tutor conversation that knows this project; plain text, not JSON ---
+def entries(area, keep=60):  # the newest `keep` one-liners of learnings.md / ideas.md
+    try: rows = [m[2] + " " + m[3] for m in (re.match(r"- \[(\d{4})\] (\S+) (.*)", l) for l in open(f"{D}/{area}.md", encoding="utf-8")) if m]
+    except FileNotFoundError: rows = []
+    return rows[-keep:]  # shortcut: whole map in every prompt, fine up to a few hundred entries; retrieve if it grows
+def ask_system():
+    st, goal = read(SP, {}), os.environ.get("GOAL")
+    con = "\n".join(f'- {x["text"]} [{x["cat"]}] box {st.get(x["id"], {}).get("box", 0)}'
+                    + (f': {x["desc"]}' if x["desc"] else "") + (f' (tutor note: {st[x["id"]]["note"]})' if st.get(x["id"], {}).get("note") else "")
+                    for x in concepts()) or "(none yet)"
+    lst = lambda a: "\n".join("- " + e for e in entries(a)) or "(none yet)"
+    return (f"You are the learner's tutor and thinking partner in {os.environ['TOPIC']}. Today is {today}.\n"
+            + (f"The learner's goal: {goal}. Keep answers useful for it.\n" if goal else "")
+            + "The learner speaks Spanish: answer in Spanish, keep technical terms in English.\n"
+            "Below is the learner's own knowledge map. Use it: connect answers to concepts they already have (by name), "
+            "build on their learnings and ideas, and point out a gap or a weak concept (low box) when it matters. "
+            "Never recite the map unprompted. If they ask what to study, quiz them, or ask about their map, use it fully.\n"
+            "Write for a terminal: plain text, short paragraphs, '- ' bullets, no headings, tables or bold. "
+            "Code only when it helps, at most 10 lines, inside ``` fences. Be direct and concrete; match the length to the question.\n"
+            "If the conversation brings up a concept worth adding to the map that is not in it, end with one last line, exactly:\n"
+            "ADD: <concept name> | <one-line definition in Spanish>\n\n"
+            f"Concepts (category, mastery box 0-{TOP}, description, tutor note):\n{con}\n\n"
+            f"Learnings:\n{lst('learnings')}\n\nIdeas:\n{lst('ideas')}")
+def talk(msgs):
+    body = {"model": MODEL, "messages": msgs}
+    if effort(): body["reasoning_effort"] = effort()
+    return s_(api("/chat/completions", body)["choices"][0]["message"]["content"])
+def show(text):
+    print(); code = False
+    for l in text.splitlines():
+        if l.strip().startswith("```"): code = not code; continue
+        if not code: l = l.replace("**", "")  # models bold anyway
+        if code: print("    " + c(36, l))
+        elif re.match(r"\s*[-*•] ", l): out(re.sub(r"^\s*[-*•] ", "", l), 4, first="  · ")
+        else: out(l, 2)
+SLASH = f"/c [concept] · /l <text> · /i <text> save to {N} · Enter quits"
+def ask_():
+    if not ai_ready(): die("ask needs " + (KEYVAR or f"a key for {BASE}"), keyhint())
+    msgs, sug, q = [{"role": "system", "content": ask_system()}], None, " ".join(args).strip()
+    chat_ = sys.stdin.isatty() or not q  # a question + a pipe: one answer; otherwise a conversation
+    if chat_ and sys.stdin.isatty(): print(c(2, f"  {N} ask · {SLASH}"))
+    if chat_ and os.environ.get("GOAL"): out(os.environ["GOAL"], 8, 2, first="  " + c(1, "goal  "))
+    while True:
+        if not q:
+            try: q = ask(c(1, "\n  > ")) if chat_ else ""
+            except EOFError: q = ""
+            if q in ("", "q", "/q"): return
+        cmd, _, rest = q.partition(" ")
+        if cmd in ("/c", "/l", "/i"):  # save without leaving: runs this command itself
+            if cmd == "/c" and not rest.strip() and not sug: print(c(2, "  nothing suggested · /c <concept>"))
+            else:
+                a = [rest.strip()] if rest.strip() else [sug[0]] + (["-d", sug[1]] if sug[1] else [])
+                subprocess.run([os.environ["LEARN_SELF"], cmd[1], "add", *a])
+                if cmd == "/c" and not rest.strip(): sug = None
+            q = ""; continue
+        if q.startswith("/"): print(c(2, "  " + SLASH)); q = ""; continue
+        msgs.append({"role": "user", "content": q})
+        if sys.stdout.isatty(): print(c(2, "  thinking…"), end="\r", flush=True)
+        try: text = talk(msgs[:1] + msgs[1:][-20:])  # shortcut: last 10 exchanges only; summarize if threads run longer
+        except Exception as e:
+            msgs.pop(); print(" " * 14, end="\r")
+            if not chat_: die(f"AI unavailable ({e})", keyhint() if str(e)[:3] == "401" else f"{N} ai")
+            print(c(31, f"  AI unavailable ({e})")); q = ""; continue
+        if sys.stdout.isatty(): print(" " * 14, end="\r")
+        msgs.append({"role": "assistant", "content": text})
+        lines = text.rstrip().splitlines()
+        if lines and lines[-1].startswith("ADD:"):  # the tutor suggests a concept for the map
+            name, _, d = lines.pop()[4:].partition("|")
+            known = {x["text"].casefold() for x in concepts()}
+            sug = (name.strip(), d.strip()) if name.strip() and name.strip().casefold() not in known else sug
+        show("\n".join(lines))
+        if sug: print(c(2, f"\n  new concept: {sug[0]}" + (" · /c adds it" if chat_ else f" · {N} c add {sug[0]}")))
+        if not chat_: return
+        q = ""
+
+try: {"learn": learn, "ai": ai, "due": due, "desc": describe, "ask": ask_}[mode]()
 except (KeyboardInterrupt, EOFError): print(); sys.exit(130)
 PY
 # bare $N: overview of every area (count, newest entry, inbox backlog) + how to go on
 if [ $# -eq 0 ]; then
+  if [ -n "$GOAL" ]; then printf '  %sgoal%s  %s\n\n' "$B" "$X" "$GOAL"
+  else printf '  %sgoal%s  %snone · %s goal <text>%s\n\n' "$B" "$X" "$M" "$N" "$X"; fi
   for a in learnings ideas concepts; do
     f=$D/$a.md; [ -f "$f" ] || f=/dev/null
     awk -v a="$a" -v nm="$N" -v w="$W" -v b="$B" -v m="$M" -v x="$X" '
@@ -445,7 +558,14 @@ if [ $# -eq 0 ]; then
   exit 0
 fi
 case "$1" in
-  learn|ai) [ "$2" = -h ] && { usage; exit 0; }; exec python3 -c "$py" "$D" "$@";;
+  goal) shift
+    case "$*" in
+      "") [ -n "$GOAL" ] && echo "$GOAL" || echo "no goal yet · $N goal <text>" >&2;;
+      -h) usage;;
+      rm) set_meta goal "" "$D/concepts.md"; say "goal cleared";;
+      *) set_meta goal "$*" "$D/concepts.md"; say "goal: $*";;
+    esac; exit 0;;
+  learn|ai|ask) [ "$2" = -h ] && { usage; exit 0; }; LEARN_SELF=$0 exec python3 -c "$py" "$D" "$@";;
   learnings|l) A=learnings H="# Learnings";;
   ideas|i) A=ideas H="# Ideas";;
   concepts|concept|c|cats) A=concepts;;
@@ -461,6 +581,7 @@ find_ln() {
   [ -f "$F" ] && ln=$(awk -v r="$1" '/^- \[/{n++; id=substr($2,2,4);
     if ((length(r)==4 && id==r) || (length(r)<4 && n+0==r+0)) {print NR; exit}}' "$F")
   [ -n "$ln" ] || { echo "$N: no entry: $1" >&2; exit 1; }
+  end=$ln; sed -n "$((ln + 1))p" "$F" | grep -q '^  [^ ]' && end=$((ln + 1))  # its description line, if any
 }
 
 # --- concepts: "## <cat>" sections with a "> description" line jev reads ---
@@ -537,11 +658,13 @@ fi
 case "$cmd" in
   "") grep -q '^- \[' "$F" 2>/dev/null || { echo "no $A yet · $N $area add <text>" >&2; exit 0; }
     render;;
-  add) cat=; args=()
+  add) cat= desc=; args=()
     while [ $# -gt 0 ]; do
       case "$1" in
         -c|--category) [ "$A" = concepts ] || die "--category is for concepts"
           [ -n "$2" ] || die "missing category"; cat=$2; shift 2;;
+        -d|--desc) [ "$A" = concepts ] || die "--desc is for concepts"
+          [ -n "$2" ] || die "missing description"; desc=$(printf '%s\n' "$2" | awk '{$1=$1} NF{printf "%s%s", (o++ ? " " : ""), $0}'); shift 2;;  # one line
         *) args+=("$1"); shift;;
       esac
     done
@@ -569,8 +692,17 @@ case "$cmd" in
       else cat=$1 note="(jev $2)"; awk -v p="$4" 'BEGIN{exit !(p >= 0.25)}' && [ "$3" != none ] && note="(jev $2 · also fits $3 $4)" alt=$3
       fi
     fi
+    dnote=
+    if [ -z "$desc" ]; then  # no -d: the tutor model writes one line; adding never fails on it
+      [ -t 2 ] && printf '%s' "${M}describing…${X}" >&2
+      desc=$(python3 -c "$py" "$D" desc "$T" 2>"$D/.desc.err") || { dnote=$(sed 's/^[^:]*: //' "$D/.desc.err"); desc=; }
+      rm -f "$D/.desc.err"; [ -t 2 ] && printf '\r\033[K' >&2
+    fi
+    [ -n "$desc" ] && E="$E
+  $desc"
     put_in "$cat" "$E"
     say "added to concepts → ${B}$cat${X} ${M}$note${X}"; render "$ln"
+    [ -n "$dnote" ] && hint "no description ($dnote) · give one: $N c add <text> -d <description>"
     n=$(awk -v ln="$ln" '/^- \[/{n++} NR==ln{print n; exit}' "$F")
     [ "$cat" = inbox ] && [ -z "$alt" ] && hint "file it: $N c mv $n <cat> · new one: $N cats add <cat> <description>"
     [ -n "$alt" ] && hint "prefer $alt? $N c mv $n $alt"
@@ -578,8 +710,8 @@ case "$cmd" in
   mv) [ "$A" = concepts ] || die "mv is for concepts"
     [ $# -eq 2 ] || die "usage: $N c mv <ref> <cat>"
     find_ln "$1"; need_cat "$2"
-    e=$(sed -n "${ln}p" "$F")
-    awk -v ln="$ln" 'NR!=ln' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    e=$(sed -n "${ln},${end}p" "$F")
+    awk -v ln="$ln" -v end="$end" 'NR<ln || NR>end' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
     put_in "$2" "$e"
     say "moved → ${B}$2${X}"; render "$ln";;
   edit) [ $# -ge 2 ] || die "missing argument"
@@ -589,6 +721,6 @@ case "$cmd" in
   rm) [ $# -ge 1 ] || die "missing argument"; [ $# -eq 1 ] || die "extra argument"
     find_ln "$1"
     say "removed (numbers below it shift up)"; render "$ln"
-    awk -v ln="$ln" 'NR!=ln' "$F" > "$F.tmp" && mv "$F.tmp" "$F";;
+    awk -v ln="$ln" -v end="$end" 'NR<ln || NR>end' "$F" > "$F.tmp" && mv "$F.tmp" "$F";;
   *) die "unknown command: $cmd";;
 esac

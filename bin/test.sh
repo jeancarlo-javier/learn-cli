@@ -51,6 +51,15 @@ grep -A2 '^## mobile' "$LEARN_DIR/concepts.md" | grep -q '> not: web frontends' 
 [ "$(rc cats rm architecture)" = 1 ] || fail "rm non-empty"
 "$Z" cats rm mobile >/dev/null 2>&1 && ! grep -q '## mobile' "$LEARN_DIR/concepts.md" || fail "cats rm"
 "$Z" cats | grep -q '^principles *1' || fail "cats counts"
+# a concept's description: one indented line under it, moved and removed with it
+"$Z" c add MVP2 2>&1 >/dev/null | grep -q 'no description' || fail "offline: no description, still added"
+"$Z" c rm "$("$Z" c | awk '/MVP2/{print $1}')" >/dev/null 2>&1
+"$Z" c add Cache -c principles -d "$(printf 'keeps  hot\ndata *')" >/dev/null 2>&1 || fail "c add -d"
+grep -A1 '\] [0-9-]* Cache$' "$LEARN_DIR/concepts.md" | grep -qx '  keeps hot data \*' || fail "desc stored one line"
+"$Z" c | grep -A1 Cache | grep -q '^ *keeps hot data' || fail "desc rendered"
+n=$("$Z" c | awk '/Cache/{print $1}'); "$Z" c mv "$n" architecture >/dev/null 2>&1 && "$Z" cats architecture | grep -A1 Cache | grep -q keeps || fail "mv keeps desc"
+[ "$(grep -c keeps "$LEARN_DIR/concepts.md")" = 1 ] || fail "mv moves desc"
+n=$("$Z" c | awk '/Cache/{print $1}'); "$Z" c rm "$n" >/dev/null 2>&1; ! grep -q keeps "$LEARN_DIR/concepts.md" || fail "rm removes desc"
 # learn + ai: fake OpenAI server; its log counts model calls by kind (lesson / quiz / grade)
 # shared LLM_*: model + effort under the saved choice, a key only to its own URL, unknown effort never sent
 LLM_EFFORT=' High ' "$Z" ai | grep -q '^effort  high .*LLM_EFFORT' || fail "LLM_EFFORT normalized"
@@ -66,11 +75,14 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self): open(p + ".auth", "a").write(f"{self.headers.get('Authorization')}\n"); self.send({"data": [{"id": "gpt-6-luna"}, {"id": "gpt-6-luna-mini"}]})
     def do_POST(self):
         b = json.loads(self.rfile.read(int(self.headers["Content-Length"]))); ask = b["messages"][-1]["content"]
-        kind = "lesson" if "Write a lesson" in ask else "quiz" if "Design 3" in ask else "grade"
+        if "thinking partner" in b["messages"][0]["content"]:  # ask: plain text, logs the thread length
+            open(p + ".log", "a").write(f"ask {len(b['messages'])}\n"); open(p + ".sys", "a").write(b["messages"][0]["content"] + "\n")
+            return self.send({"choices": [{"message": {"content": f"ANSWER to {ask}\n- a **bullet**\nADD: Bulkhead | aisla fallos"}}]})
+        kind = "lesson" if "Write a lesson" in ask else "quiz" if "Design 3" in ask else "desc" if "Define it" in ask else "grade"
         open(p + ".log", "a").write(f"{kind} {b.get('reasoning_effort')}\n"); open(p + ".sys", "a").write(b["messages"][0]["content"] + "\n"); open(p + ".auth", "a").write(f"{self.headers.get('Authorization')}\n")
         o = {"lesson": {"what": "LESSON-WHAT", "why": "w", "how": "h", "example": "e", "tradeoffs": ["t1", 7], "confuse": "", "remember": "REMEMBER"},
              "quiz": {"questions": [{"q": f"Q{i}?", "a": f"REF{i}"} for i in (1, 2, 3)]},
-             "grade": {"score": 2, "per": [{"ok": 2, "fix": ""}, {"ok": 0, "fix": "FIX2"}, {"ok": 2}], "feedback": "FB", "note": "N"}}[kind]
+             "desc": {"desc": " DESC\nOK "}, "grade": {"score": 2, "per": [{"ok": 2, "fix": ""}, {"ok": 0, "fix": "FIX2"}, {"ok": 2}], "feedback": "FB", "note": "N"}}[kind]
         self.send({"choices": [{"message": {"content": json.dumps(o)}}]})
 s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); open(p, "w").write(str(s.server_port)); s.serve_forever()
 PY
@@ -84,7 +96,14 @@ echo "$o" | grep -q LESSON-WHAT && echo "$o" | grep -q REF3 && echo "$o" | grep 
 [ "$(calls lesson) $(calls quiz) $(calls grade)" = "1 1 0" ] || fail "learn new calls"
 grep -q 'lesson none' "$L" || fail "effort none for gpt-6"
 grep -q 'expert in software design' "$LEARN_DIR/srv.sys" || fail "topic in prompt"
-python3 -c "import json,sys; s=json.load(open(sys.argv[1]))" "$LEARN_DIR/state.json" || fail "state json"
+# goal: a header line under the topic, shown in the overview and by learn, sent to the tutor
+"$Z" goal 2>&1 | grep -q 'no goal yet' || fail "goal empty"
+"$Z" goal pass the exam >/dev/null 2>&1 && "$Z" goal ship it >/dev/null 2>&1 || fail "goal set"
+[ "$(sed -n 2,3p "$LEARN_DIR/concepts.md" | tr '\n' '|')" = "> topic: software design|> goal: ship it|" ] || fail "goal replaced under topic"
+[ "$("$Z" goal)" = "ship it" ] && "$Z" | grep -q 'goal  ship it' || fail "goal shown"
+o=$(printf '\n\n\n\n' | "$Z" learn solid 2>&1); echo "$o" | grep -q 'goal  ship it' || fail "learn shows goal"
+grep -q "learner's goal: ship it" "$LEARN_DIR/srv.sys" || fail "goal in prompt"
+"$Z" goal rm >/dev/null 2>&1; ! grep -q '^> goal:' "$LEARN_DIR/concepts.md" || fail "goal rm"python3 -c "import json,sys; s=json.load(open(sys.argv[1]))" "$LEARN_DIR/state.json" || fail "state json"
 o=$(printf '\na\nb\nc\nq\n' | "$Z" learn 1 2>&1)  # box 0 again: cached lesson; graded early -> box stays
 [ "$(calls lesson) $(calls grade)" = "1 1" ] || fail "lesson cached"
 echo "$o" | grep -q FIX2 && echo "$o" | grep -q 'box 0/5' && echo "$o" | grep -q 'keeps the schedule' || fail "early: $o"
@@ -148,8 +167,18 @@ M ls 2>&1 | grep -q 'no projects yet' || fail "ls empty"
 "$LEARN_BIN/mylab" 2>&1 | grep -q 'mylab <l|i|c>' || fail "hints use the command name"
 "$LEARN_BIN/mylab" -h | grep -q 'concepts on machine learning' || fail "project help shows topic"
 M ls | grep -q 'mylab .* 1 l .*machine learning' || fail "ls row"
-"$LEARN_BIN/mylab" c add Overfitting >/dev/null 2>&1; printf '\n\n\n\n' | "$LEARN_BIN/mylab" learn Overfitting >/dev/null 2>&1
+"$LEARN_BIN/mylab" c add Overfitting >/dev/null 2>&1; grep -qx '  DESC OK' "$P/.learn-cli/concepts.md" || fail "AI desc on add"
+ printf '\n\n\n\n' | "$LEARN_BIN/mylab" learn Overfitting >/dev/null 2>&1
 grep -q 'expert in machine learning' "$LEARN_DIR/srv.sys" || fail "each project its topic"
+# ask: the project's map in the prompt, one answer for a piped question, a thread otherwise, /c saves the suggestion
+o=$("$LEARN_BIN/mylab" ask what is it 2>&1)
+echo "$o" | grep -q 'ANSWER to what is it' && echo "$o" | grep -q '· a bullet' && ! echo "$o" | grep -q 'ADD:' || fail "ask one-shot: $o"
+echo "$o" | grep -q 'new concept: Bulkhead' || fail "ask suggests"
+grep -q 'Overfitting \[inbox\] box 0: DESC OK' "$LEARN_DIR/srv.sys" && grep -q 'thinking partner in machine learning' "$LEARN_DIR/srv.sys" || fail "ask context"
+: > "$L"; printf 'first\nsecond\n/c\n\n' | "$LEARN_BIN/mylab" ask >/dev/null 2>&1
+[ "$(grep ^ask "$L" | tr '\n' ' ')" = "ask 2 ask 4 " ] || fail "ask keeps the thread: $(cat "$L")"
+grep -A1 '\] [0-9-]* Bulkhead$' "$P/.learn-cli/concepts.md" | grep -qx '  aisla fallos' || fail "/c saves the suggestion"
+printf '/l from ask\n' | "$LEARN_BIN/mylab" ask >/dev/null 2>&1; grep -q 'from ask' "$P/.learn-cli/learnings.md" || fail "/l"
 M edit mylab --topic deep learning >/dev/null 2>&1; grep -qx '> topic: deep learning' "$P/.learn-cli/concepts.md" || fail "edit topic"
 [ "$(grep -c '^> topic:' "$P/.learn-cli/concepts.md")" = 1 ] || fail "one topic line"
 M edit mylab --name lab2 >/dev/null 2>&1; [ ! -e "$LEARN_BIN/mylab" ] && "$LEARN_BIN/lab2" l | grep -q deep || fail "edit name"
