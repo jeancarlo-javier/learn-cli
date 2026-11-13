@@ -4,15 +4,15 @@ A terminal learning notebook with an AI tutor. Each subject gets its own command
 concepts live as plain markdown in that project, and the tutor teaches, quizzes and answers with your map in mind.
 
 ```sh
-learn-cli add mll machine learning --dir ~/ml-lab   # new project + the command `mll`
-mll goal Ship an ML side project by March           # why you study it: shown and given to the tutor
-mll c add Overfitting                               # concept: the AI files it and writes a one-line description
-mll l add Always split before scaling               # learning · mll i add … for ideas
+learn-cli add mll "machine learning" --dir ~/ml-lab  # new project + the command `mll`
+mll goal "Ship an ML side project by March"         # why you study it: shown and given to the tutor
+mll c add "Overfitting"                             # concept: the AI files it and writes a one-line description
+mll l add "Always split before scaling"             # learning · mll i add … for ideas
 mll learn                                           # spaced repetition: lesson, 3 questions, graded
-mll ask why does dropout regularize?                # tutor chat that knows your concepts, progress and goal
+mll ask "Why does dropout regularize?"              # tutor chat that knows your concepts, progress and goal
 ```
 
-- **Concepts** are grouped in categories (`mll cats add <cat> <description>`); without `-c`, [jev](https://typesafe.ai) picks one.
+- **Concepts** are grouped in categories (`mll cats add <cat> "<description>"`); without `-c`, [jev](https://typesafe.ai) picks one.
 - **learn** schedules reviews (Leitner boxes); a weak concept gets a lesson first, cached once written.
 - **ask** keeps the thread for follow-ups; `/c` saves a concept it suggests, `/l` `/i` save notes.
 - `mll` alone shows an overview; `mll -h` and `learn-cli -h` list everything.
