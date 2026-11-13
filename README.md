@@ -25,7 +25,7 @@ export OPENAI_API_KEY=…    # or LLM_BASE_URL + LLM_API_KEY (+ LLM_MODEL) for a
 export TYPESAFE_API_KEY=…  # optional: auto-filing concepts; without it they go to inbox
 ```
 
-Needs bash and Python 3.12+, no packages. Per project: `<cmd> ai --model <id> --effort <e> --url <u>`.
+Runs on macOS and Linux (tests pass on both; on Windows, use WSL). Needs bash and Python 3.12+, no packages. Per project: `<cmd> ai --model <id> --effort <e> --url <u>`.
 
 ## Data
 
