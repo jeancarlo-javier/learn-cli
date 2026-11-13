@@ -1,18 +1,36 @@
 # learn-cli
 
-One-line learnings, ideas and concepts in markdown, plus spaced-repetition study with an AI tutor.
-Code only: each learning project gets its own command and keeps its data in `<project>/.learn-cli/`.
+A terminal learning notebook with an AI tutor. Each subject gets its own command; its learnings, ideas and
+concepts live as plain markdown in that project, and the tutor teaches, quizzes and answers with your map in mind.
 
 ```sh
-learn-cli add mll machine learning --dir ~/pr26/ml-lab   # .learn-cli/ there + the command mll in ~/.local/bin
-learn-cli                                                   # list projects · learn-cli -h
-mll cats add eval Metrics, validation, calibration       # inside a project, from any folder
-mll c add Overfitting · mll l add ... · mll learn · mll -h
-mll ask why does dropout regularize?                   # tutor that knows the project's map; follow up, /c /l /i save
+learn-cli add mll machine learning --dir ~/ml-lab   # new project + the command `mll`
+mll goal Ship an ML side project by March           # why you study it: shown and given to the tutor
+mll c add Overfitting                               # concept: the AI files it and writes a one-line description
+mll l add Always split before scaling               # learning · mll i add … for ideas
+mll learn                                           # spaced repetition: lesson, 3 questions, graded
+mll ask why does dropout regularize?                # tutor chat that knows your concepts, progress and goal
 ```
 
-- `learn-cli` alone manages projects: `ls`, `add`, `edit --name|--topic`, `rm` (removes the command, keeps the data).
-- Install: `ln -s ~/pr26/learn-cli/bin/learn-cli ~/.local/bin/learn-cli`.
-- A project command is a small wrapper in `~/.local/bin` (`LEARN_BIN` overrides) tagged `# learn-cli project`: those files are the registry.
-- Data per project: `learnings.md`, `ideas.md`, `concepts.md` (`> topic:` sets the tutor's subject, `> goal:` — set with `<cmd> goal <text>` — is shown in the overview and by `learn`, and steers the tutor), `state.json`, `cards.json`, `config.json`.
-- Tests: `bin/test.sh` (offline, fake AI server).
+- **Concepts** are grouped in categories (`mll cats add <cat> <description>`); without `-c`, [jev](https://typesafe.ai) picks one.
+- **learn** schedules reviews (Leitner boxes); a weak concept gets a lesson first, cached once written.
+- **ask** keeps the thread for follow-ups; `/c` saves a concept it suggests, `/l` `/i` save notes.
+- `mll` alone shows an overview; `mll -h` and `learn-cli -h` list everything.
+
+## Install
+
+```sh
+git clone https://github.com/jeancarlo-javier/learn-cli && ln -s "$PWD/learn-cli/bin/learn-cli" ~/.local/bin/
+export OPENAI_API_KEY=…    # or LLM_BASE_URL + LLM_API_KEY (+ LLM_MODEL) for any OpenAI-compatible API
+export TYPESAFE_API_KEY=…  # optional: auto-filing concepts; without it they go to inbox
+```
+
+Needs bash and Python 3.12+, no packages. Per project: `<cmd> ai --model <id> --effort <e> --url <u>`.
+
+## Data
+
+`<project>/.learn-cli/`: `learnings.md`, `ideas.md`, `concepts.md` (topic, goal, categories, entries), plus
+`state.json` (schedule), `cards.json` (lessons), `config.json` (AI settings). Project commands are small wrappers
+in `~/.local/bin` (`LEARN_BIN` overrides); `learn-cli rm` removes one and keeps the data.
+
+Tests: `bin/test.sh` (offline, fake AI server).

@@ -71,7 +71,7 @@ ${B}inside a project${X}
   <cmd> -h                                learnings, ideas, concepts and study
 
 ${B}examples${X}
-  cd ~/pr26/ml-lab && learn-cli add mll machine learning and data science
+  cd ~/ml-lab && learn-cli add mll machine learning and data science
   learn-cli edit mll --topic deep learning
 U
 }
